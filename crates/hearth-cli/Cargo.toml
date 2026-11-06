@@ -1,0 +1,16 @@
+[package]
+name = "hearth-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "hearth"
+path = "src/main.rs"
+
+[dependencies]
+hearth-core = { path = "../hearth-core" }
+serde_json = { workspace = true, features = ["preserve_order"] }
+base64.workspace = true
+libc.workspace = true
+mlua = { version = "0.11", features = ["lua54", "vendored", "serialize"] }
