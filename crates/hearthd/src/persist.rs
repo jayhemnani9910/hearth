@@ -3,6 +3,7 @@
 //! with NEW shell processes in the saved directories. Running programs are
 //! never claimed to survive a server restart.
 
+use crate::sync::Lock;
 use crate::server::{Core, Server};
 use crate::state::{Node, Session};
 use hearth_core::paths;
@@ -34,7 +35,7 @@ pub fn capture(core: &Core) -> Saved {
     let mut blocks = HashMap::new();
     for id in core.s.all_blocks() {
         if let Some(b) = core.blocks.get(&id) {
-            let inner = b.inner.lock().unwrap();
+            let inner = b.inner.lk();
             let cwd = inner.model.cwd.clone().or_else(|| crate::pty::proc_cwd(crate::pty::foreground_pgrp(b.master_fd()).unwrap_or(b.pid)));
             blocks.insert(id, SavedBlock { argv: b.spec.argv.clone(), cwd, title: inner.model.title.clone() });
         }
@@ -101,7 +102,7 @@ fn rename_leaves(n: &mut Node, map: &HashMap<String, String>) {
 /// Recreates saved sessions/windows/layouts with new shells. Saved commands
 /// are not re-run; their panes get a shell in the same directory.
 pub fn restore(server: &Arc<Server>, saved: Saved) -> usize {
-    let mut core = server.core.lock().unwrap();
+    let mut core = server.core.lk();
     core.s.next_id = core.s.next_id.max(saved.next_id);
     let mut count = 0;
     for mut sess in saved.sessions {

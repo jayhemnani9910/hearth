@@ -6,6 +6,7 @@
 //! the previous configuration. Invalid individual declarations are skipped
 //! and reported as diagnostics.
 
+use crate::sync::Lock;
 use crate::server::{Ctx, Server};
 use hearth_core::conn::ApiError;
 use hearth_core::proto::code;
@@ -116,11 +117,11 @@ impl Engine {
                             let res = match r {
                                 Ok((lua, decl)) => {
                                     current = Some(lua);
-                                    *l2.lock().unwrap() = decl;
+                                    *l2.lk() = decl;
                                     Ok(())
                                 }
                                 Err(e) => {
-                                    let mut l = l2.lock().unwrap();
+                                    let mut l = l2.lk();
                                     l.error = Some(e.clone());
                                     l.path = Some(path);
                                     Err(e)
@@ -129,7 +130,7 @@ impl Engine {
                             let _ = reply.send(res);
                         }
                         Req::Run(name, args, client, reply) => {
-                            let timeout = l2.lock().unwrap().settings.action_timeout_ms;
+                            let timeout = l2.lk().settings.action_timeout_ms;
                             c2.store(false, Ordering::Relaxed);
                             let r = match &current {
                                 Some(lua) => run(lua, &name, args, client, Duration::from_millis(timeout), &c2),
@@ -145,27 +146,27 @@ impl Engine {
     }
 
     pub fn loaded(&self) -> Loaded {
-        self.loaded.lock().unwrap().clone()
+        self.loaded.lk().clone()
     }
 
     pub fn settings(&self) -> Settings {
-        self.loaded.lock().unwrap().settings.clone()
+        self.loaded.lk().settings.clone()
     }
 
     pub fn load_file(&self, path: PathBuf) -> Result<(), String> {
         let (tx, rx) = mpsc::channel();
-        let _ = self.tx.lock().unwrap().send(Req::Load(path, tx));
+        let _ = self.tx.lk().send(Req::Load(path, tx));
         rx.recv().unwrap_or(Err("lua thread gone".into()))
     }
 
     pub fn reload(&self) -> Result<(), String> {
-        let path = self.loaded.lock().unwrap().path.clone().unwrap_or_else(config_path);
+        let path = self.loaded.lk().path.clone().unwrap_or_else(config_path);
         self.load_file(path)
     }
 
     pub fn run_action(&self, name: &str, args: Value, client: Option<String>) -> Result<Value, ApiError> {
         let (tx, rx) = mpsc::channel();
-        let _ = self.tx.lock().unwrap().send(Req::Run(name.into(), args, client, tx));
+        let _ = self.tx.lk().send(Req::Run(name.into(), args, client, tx));
         rx.recv().unwrap_or(Err(ApiError::new(code::FAILED, "lua thread gone")))
     }
 
@@ -207,7 +208,7 @@ fn install_api(lua: &Lua, decl: Arc<Mutex<Decl>>, in_config: Arc<AtomicBool>) ->
                 Some(v) if !v.is_nil() => lua.from_value(v)?,
                 _ => json!({}),
             };
-            let mut d = d.lock().unwrap();
+            let mut d = d.lk();
             match check_bind(&keys, &action) {
                 Ok(()) => d.bindings.push(json!({"keys": keys, "action": action, "args": args, "mode": mode})),
                 Err(e) => d.diagnostics.push(format!("bind: {e}")),
@@ -220,7 +221,7 @@ fn install_api(lua: &Lua, decl: Arc<Mutex<Decl>>, in_config: Arc<AtomicBool>) ->
         "mode",
         lua.create_function(move |_, t: Table| {
             let name: Option<String> = t.get("name")?;
-            let mut d = d.lock().unwrap();
+            let mut d = d.lk();
             let Some(name) = name else {
                 d.diagnostics.push("mode: missing name".into());
                 return Ok(());
@@ -246,7 +247,7 @@ fn install_api(lua: &Lua, decl: Arc<Mutex<Decl>>, in_config: Arc<AtomicBool>) ->
         lua.create_function(move |lua, t: Table| {
             let name: Option<String> = t.get("name")?;
             let run: Option<Function> = t.get("run")?;
-            let mut dd = d.lock().unwrap();
+            let mut dd = d.lk();
             let (Some(name), Some(run)) = (name, run) else {
                 dd.diagnostics.push("action: needs name and run=function".into());
                 return Ok(());
@@ -286,7 +287,7 @@ fn install_api(lua: &Lua, decl: Arc<Mutex<Decl>>, in_config: Arc<AtomicBool>) ->
         lua.create_function(move |_, t: Table| {
             let name: Option<String> = t.get("name")?;
             let address: Option<String> = t.get("address")?;
-            let mut d = d.lock().unwrap();
+            let mut d = d.lk();
             match (name, address) {
                 (Some(n), Some(a)) => match hearth_core::conn::Target::parse(&a) {
                     Ok(_) => d.hosts.push(json!({"name": n, "address": a})),
@@ -301,7 +302,7 @@ fn install_api(lua: &Lua, decl: Arc<Mutex<Decl>>, in_config: Arc<AtomicBool>) ->
     hearth.set(
         "set",
         lua.create_function(move |_, t: Table| {
-            let mut d = d.lock().unwrap();
+            let mut d = d.lk();
             for pair in t.pairs::<String, LV>() {
                 let (k, v) = pair?;
                 let s = &mut d.settings;
@@ -438,7 +439,7 @@ fn load(path: &PathBuf) -> Result<(Lua, Loaded), String> {
         lua.remove_hook();
     }
     in_config.store(false, Ordering::Relaxed);
-    let d = decl.lock().unwrap();
+    let d = decl.lk();
     Ok((
         lua,
         Loaded {

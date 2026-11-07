@@ -1,6 +1,7 @@
 //! Typed API registry (self-description) and method dispatch. The GUI, CLI
 //! and Lua all go through `Server::call`.
 
+use crate::sync::Lock;
 use crate::block::Block;
 use crate::server::{Core, Ctx, Server, session_view};
 use crate::state::{Dir, neighbor};
@@ -162,10 +163,10 @@ fn validate(m: &Method, p: &Value) -> Result<(), ApiError> {
 impl Server {
     fn block(&self, p: &Value) -> Result<Arc<Block>, ApiError> {
         let id = s(p, "block")?;
-        Server::find_block(&self.core.lock().unwrap(), id)
+        Server::find_block(&self.core.lk(), id)
     }
 
-    fn kill_blocks(core: &mut Core, ids: &[String]) {
+    pub(crate) fn kill_blocks(core: &mut Core, ids: &[String]) {
         for id in ids {
             if let Some(b) = core.blocks.get(id).cloned() {
                 b.kill();
@@ -181,7 +182,7 @@ impl Server {
         match method {
             "server.version" => Ok(json!({"version": env!("CARGO_PKG_VERSION"), "protocol": hearth_core::proto::PROTOCOL, "incarnation": self.incarnation})),
             "server.status" => {
-                let core = self.core.lock().unwrap();
+                let core = self.core.lk();
                 let clients: Vec<Value> = core.clients.values().map(|c| json!({"id": c.id, "kind": c.kind, "name": c.name, "principal": c.principal, "transport": c.transport, "remote_control": c.remote_control, "subscriptions": c.subs.len()})).collect();
                 let cfg = self.lua.loaded();
                 Ok(json!({
@@ -193,7 +194,7 @@ impl Server {
                     "sessions": core.s.sessions.len(),
                     "blocks": core.blocks.len(),
                     "clients": clients,
-                    "listen": *self.opts.listen.lock().unwrap(),
+                    "listen": *self.opts.listen.lk(),
                     "persist": self.opts.persist.load(std::sync::atomic::Ordering::Relaxed),
                     "auto_exit": self.opts.auto_exit,
                     "config": {"path": cfg.path, "loaded": cfg.loaded, "diagnostics": cfg.diagnostics, "error": cfg.error},
@@ -201,7 +202,7 @@ impl Server {
             }
             "server.stop" => {
                 {
-                    let mut core = self.core.lock().unwrap();
+                    let mut core = self.core.lk();
                     let n = core.blocks.len();
                     if n > 0 && p["force"].as_bool() != Some(true) {
                         return Err(ApiError::new(code::FAILED, format!("{n} terminal(s) still running; stopping ends them. Pass force=true")));
@@ -212,7 +213,7 @@ impl Server {
                 // then stop saving so ending the programs does not erase it.
                 self.persist_now();
                 self.opts.persist.store(false, std::sync::atomic::Ordering::Relaxed);
-                let mut core = self.core.lock().unwrap();
+                let mut core = self.core.lk();
                 let ids: Vec<String> = core.blocks.keys().cloned().collect();
                 Self::kill_blocks(&mut core, &ids);
                 Server::emit(&mut core, "server.stopping", json!({}));
@@ -226,11 +227,11 @@ impl Server {
                 Ok(json!({"name": d.name, "summary": d.summary, "params": d.params, "result": d.result, "blocking": is_blocking(d.name), "example": d.example}))
             }
             "session.list" => {
-                let core = self.core.lock().unwrap();
+                let core = self.core.lk();
                 Ok(Value::Array(core.s.sessions.iter().map(|s| json!({"id": s.id, "name": s.name, "windows": s.windows.len(), "revision": s.revision, "active_window": s.active_window})).collect()))
             }
             "session.bootstrap" => {
-                let mut core = self.core.lock().unwrap();
+                let mut core = self.core.lk();
                 if p["subscribe"].as_bool() != Some(false) {
                     if let Some(c) = &ctx.conn {
                         if !core.subscribers.iter().any(|x| x.id == c.id) {
@@ -242,12 +243,12 @@ impl Server {
                 Ok(json!({"seq": core.event_seq, "sessions": sessions, "client_id": ctx.client}))
             }
             "session.view" => {
-                let core = self.core.lock().unwrap();
+                let core = self.core.lk();
                 let sid = core.s.resolve_session(s(p, "session")?)?;
                 Ok(session_view(&core, core.s.session(&sid)?))
             }
             "session.create" => {
-                let mut core = self.core.lock().unwrap();
+                let mut core = self.core.lk();
                 // Allocate the session id first so the shell's environment has it.
                 let sid = core.s.alloc('s');
                 let b = self.create_block(&mut core, &sid, p)?;
@@ -256,7 +257,7 @@ impl Server {
                 Ok(json!({"session": sid, "window": wid, "block": b.id}))
             }
             "session.rename" => {
-                let mut core = self.core.lock().unwrap();
+                let mut core = self.core.lk();
                 let sid = core.s.resolve_session(s(p, "session")?)?;
                 let sess = core.s.session_mut(&sid)?;
                 sess.name = s(p, "name")?.to_string();
@@ -265,7 +266,7 @@ impl Server {
                 ok()
             }
             "session.close" => {
-                let mut core = self.core.lock().unwrap();
+                let mut core = self.core.lk();
                 let sid = core.s.resolve_session(s(p, "session")?)?;
                 let mut ids = vec![];
                 for w in &core.s.session(&sid)?.windows {
@@ -277,7 +278,7 @@ impl Server {
                 ok()
             }
             "window.create" => {
-                let mut core = self.core.lock().unwrap();
+                let mut core = self.core.lk();
                 let sid = core.s.resolve_session(s(p, "session")?)?;
                 let b = self.create_block(&mut core, &sid, p)?;
                 let wid = core.s.new_window(&sid, p["name"].as_str().map(String::from), &b.id, p["index"].as_u64().map(|i| i as usize))?;
@@ -285,7 +286,7 @@ impl Server {
                 Ok(json!({"session": sid, "window": wid, "block": b.id}))
             }
             "window.rename" => {
-                let mut core = self.core.lock().unwrap();
+                let mut core = self.core.lk();
                 let (sid, wid) = core.s.resolve_window(s(p, "window")?)?;
                 core.s.window_mut(&sid, &wid)?.name = s(p, "name")?.to_string();
                 core.s.session_mut(&sid)?.revision += 1;
@@ -293,7 +294,7 @@ impl Server {
                 ok()
             }
             "window.close" => {
-                let mut core = self.core.lock().unwrap();
+                let mut core = self.core.lk();
                 let (sid, wid) = core.s.resolve_window(s(p, "window")?)?;
                 let mut ids = vec![];
                 core.s.window_mut(&sid, &wid)?.layout.leaves(&mut ids);
@@ -301,14 +302,14 @@ impl Server {
                 ok()
             }
             "window.move" => {
-                let mut core = self.core.lock().unwrap();
+                let mut core = self.core.lk();
                 let (_, wid) = core.s.resolve_window(s(p, "window")?)?;
                 let sid = core.s.move_window(&wid, p["index"].as_u64().unwrap_or(0) as usize)?;
                 Server::emit_session(&mut core, &sid);
                 ok()
             }
             "window.select" => {
-                let mut core = self.core.lock().unwrap();
+                let mut core = self.core.lk();
                 let (sid, wid) = core.s.resolve_window(s(p, "window")?)?;
                 let sess = core.s.session_mut(&sid)?;
                 sess.active_window = wid;
@@ -318,7 +319,7 @@ impl Server {
             }
             "block.split" => {
                 let dir = Dir::parse(s(p, "direction")?)?;
-                let mut core = self.core.lock().unwrap();
+                let mut core = self.core.lk();
                 let target = s(p, "block")?;
                 let (sid, _) = core.s.locate(target).ok_or_else(|| ApiError::new(code::NOT_FOUND, format!("no block '{target}' in a layout")))?;
                 let b = self.create_block(&mut core, &sid, p)?;
@@ -328,7 +329,7 @@ impl Server {
                 Ok(json!({"session": sid, "window": wid, "block": b.id}))
             }
             "block.close" => {
-                let mut core = self.core.lock().unwrap();
+                let mut core = self.core.lk();
                 let id = s(p, "block")?.to_string();
                 if !core.blocks.contains_key(&id) {
                     return Err(ApiError::new(code::NOT_FOUND, format!("no running block '{id}'")));
@@ -337,7 +338,7 @@ impl Server {
                 ok()
             }
             "block.focus" => {
-                let mut core = self.core.lock().unwrap();
+                let mut core = self.core.lk();
                 let id = s(p, "block")?;
                 let (sid, wid) = core.s.locate(id).ok_or_else(|| ApiError::new(code::NOT_FOUND, format!("no block '{id}'")))?;
                 let w = core.s.window_mut(&sid, &wid)?;
@@ -353,7 +354,7 @@ impl Server {
                 Ok(json!({"session": sid, "window": wid, "block": target}))
             }
             "block.zoom" => {
-                let mut core = self.core.lock().unwrap();
+                let mut core = self.core.lk();
                 let id = s(p, "block")?;
                 let (sid, wid) = core.s.locate(id).ok_or_else(|| ApiError::new(code::NOT_FOUND, format!("no block '{id}'")))?;
                 let w = core.s.window_mut(&sid, &wid)?;
@@ -367,27 +368,27 @@ impl Server {
                 Ok(json!({"zoom": on}))
             }
             "block.resize" => {
-                let mut core = self.core.lock().unwrap();
+                let mut core = self.core.lk();
                 let sid = core.s.grow(s(p, "block")?, Dir::parse(s(p, "direction")?)?, p["amount"].as_f64().unwrap_or(0.05) as f32)?;
                 Server::emit_session(&mut core, &sid);
                 ok()
             }
             "block.swap" => {
-                let mut core = self.core.lock().unwrap();
+                let mut core = self.core.lk();
                 for sid in core.s.swap(s(p, "block")?, s(p, "other")?)? {
                     Server::emit_session(&mut core, &sid);
                 }
                 ok()
             }
             "block.move" => {
-                let mut core = self.core.lock().unwrap();
+                let mut core = self.core.lk();
                 for sid in core.s.move_block(s(p, "block")?, s(p, "target")?, Dir::parse(s(p, "direction")?)?)? {
                     Server::emit_session(&mut core, &sid);
                 }
                 ok()
             }
             "block.info" => {
-                let core = self.core.lock().unwrap();
+                let core = self.core.lk();
                 let b = Server::find_block(&core, s(p, "block")?)?;
                 let mut info = b.info();
                 info["location"] = json!(core.s.locate(&b.id).map(|(s, w)| json!({"session": s, "window": w})));
@@ -402,24 +403,24 @@ impl Server {
                         b.set_owner_and_size(&client);
                     }
                     "request" => {
-                        let unowned = b.inner.lock().unwrap().owner.is_none();
+                        let unowned = b.inner.lk().owner.is_none();
                         if unowned {
                             b.set_owner_and_size(&client);
                         }
                     }
                     _ => b.release_owner(&client),
                 }
-                Ok(json!({"owner": b.inner.lock().unwrap().owner}))
+                Ok(json!({"owner": b.inner.lk().owner}))
             }
             "layout.set_ratio" => {
-                let mut core = self.core.lock().unwrap();
+                let mut core = self.core.lk();
                 let (sid, wid) = core.s.resolve_window(s(p, "window")?)?;
                 core.s.set_ratio(&sid, &wid, p["path"].as_str().unwrap_or(""), p["ratio"].as_f64().unwrap_or(0.5) as f32)?;
                 Server::emit_session(&mut core, &sid);
                 ok()
             }
             "layout.balance" => {
-                let mut core = self.core.lock().unwrap();
+                let mut core = self.core.lk();
                 let (sid, wid) = core.s.resolve_window(s(p, "window")?)?;
                 core.s.balance(&sid, &wid)?;
                 Server::emit_session(&mut core, &sid);
@@ -450,7 +451,7 @@ impl Server {
             "terminal.send_text" => {
                 let b = self.block(p)?;
                 let text = s(p, "text")?;
-                let bracketed = p["paste"].as_bool() == Some(true) && b.inner.lock().unwrap().model.mode().contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE);
+                let bracketed = p["paste"].as_bool() == Some(true) && b.inner.lk().model.mode().contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE);
                 let mut bytes = Vec::new();
                 if bracketed {
                     bytes.extend(b"\x1b[200~");
@@ -465,7 +466,7 @@ impl Server {
             }
             "terminal.send_keys" => {
                 let b = self.block(p)?;
-                let app = b.inner.lock().unwrap().model.mode().contains(alacritty_terminal::term::TermMode::APP_CURSOR);
+                let app = b.inner.lk().model.mode().contains(alacritty_terminal::term::TermMode::APP_CURSOR);
                 let mut bytes = Vec::new();
                 for k in p["keys"].as_array().into_iter().flatten() {
                     let k = k.as_str().ok_or_else(|| ApiError::new(code::INVALID, "keys must be strings"))?;
@@ -476,7 +477,7 @@ impl Server {
             }
             "terminal.capture" => {
                 let b = self.block(p)?;
-                let inner = b.inner.lock().unwrap();
+                let inner = b.inner.lk();
                 let history = p["history"].as_bool().unwrap_or(false);
                 let fmt = p["format"].as_str().unwrap_or("text");
                 let content = match fmt {
@@ -501,7 +502,7 @@ impl Server {
                 let deadline = p["timeout_ms"].as_u64().map(|t| std::time::Instant::now() + Duration::from_millis(t));
                 loop {
                     let (found, exited) = {
-                        let inner = b.inner.lock().unwrap();
+                        let inner = b.inner.lk();
                         (inner.model.capture_text(false).contains(text), inner.exit.is_some() && inner.eof)
                     };
                     if found {
@@ -520,7 +521,7 @@ impl Server {
                 let conn = ctx.conn.clone().ok_or_else(|| ApiError::new(code::INVALID, "attach needs a connection"))?;
                 let b = self.block(p)?;
                 let (sub, client) = {
-                    let mut core = self.core.lock().unwrap();
+                    let mut core = self.core.lk();
                     let c = core.clients.get_mut(&ctx.conn_id).ok_or_else(|| ApiError::new(code::FAILED, "client gone"))?;
                     c.next_sub += 1;
                     c.subs.insert(c.next_sub, b.id.clone());
@@ -537,7 +538,7 @@ impl Server {
             "terminal.detach" => {
                 let sub = p["sub"].as_u64().unwrap_or(0) as u32;
                 let block = {
-                    let mut core = self.core.lock().unwrap();
+                    let mut core = self.core.lk();
                     let c = core.clients.get_mut(&ctx.conn_id).ok_or_else(|| ApiError::new(code::FAILED, "client gone"))?;
                     let bid = c.subs.remove(&sub).ok_or_else(|| ApiError::new(code::NOT_FOUND, format!("no subscription {sub}")))?;
                     Server::find_block(&core, &bid).ok()
@@ -550,7 +551,7 @@ impl Server {
             "terminal.resize" => {
                 let sub = p["sub"].as_u64().unwrap_or(0) as u32;
                 let block = {
-                    let core = self.core.lock().unwrap();
+                    let core = self.core.lk();
                     let c = core.clients.get(&ctx.conn_id).ok_or_else(|| ApiError::new(code::FAILED, "client gone"))?;
                     let bid = c.subs.get(&sub).ok_or_else(|| ApiError::new(code::NOT_FOUND, format!("no subscription {sub}")))?;
                     Server::find_block(&core, bid)?
@@ -571,28 +572,28 @@ impl Server {
             }
             "terminal.status" => {
                 let b = self.block(p)?;
-                let inner = b.inner.lock().unwrap();
+                let inner = b.inner.lk();
                 Ok(json!({"records": inner.model.status.records(), "summary": inner.model.status.summary()}))
             }
             "events.subscribe" => {
                 let conn = ctx.conn.clone().ok_or_else(|| ApiError::new(code::INVALID, "needs a connection"))?;
-                let mut core = self.core.lock().unwrap();
+                let mut core = self.core.lk();
                 if !core.subscribers.iter().any(|x| x.id == conn.id) {
                     core.subscribers.push(conn);
                 }
                 Ok(json!({"seq": core.event_seq}))
             }
             "events.unsubscribe" => {
-                let mut core = self.core.lock().unwrap();
+                let mut core = self.core.lk();
                 core.subscribers.retain(|c| c.id != ctx.conn_id);
                 ok()
             }
             "client.list" => {
-                let core = self.core.lock().unwrap();
+                let core = self.core.lk();
                 Ok(Value::Array(core.clients.values().map(|c| json!({"id": c.id, "kind": c.kind, "name": c.name, "principal": c.principal, "transport": c.transport, "remote_control": c.remote_control, "connected_ms": c.connected_ms})).collect()))
             }
             "client.set" => {
-                let mut core = self.core.lock().unwrap();
+                let mut core = self.core.lk();
                 if let Some(c) = core.clients.get_mut(&ctx.conn_id) {
                     if let Some(rc) = p["remote_control"].as_bool() {
                         c.remote_control = rc;
@@ -601,7 +602,7 @@ impl Server {
                 ok()
             }
             "client.action" => {
-                let core = self.core.lock().unwrap();
+                let core = self.core.lk();
                 let want = p["client"].as_str();
                 let mut n = 0;
                 for c in core.clients.values() {
@@ -619,7 +620,7 @@ impl Server {
             "config.reload" => {
                 let r = self.lua.reload();
                 let cfg = self.lua.loaded();
-                let mut core = self.core.lock().unwrap();
+                let mut core = self.core.lk();
                 Server::emit(&mut core, "config.reloaded", json!({"ok": r.is_ok()}));
                 Ok(json!({"ok": r.is_ok(), "error": r.err(), "diagnostics": cfg.diagnostics}))
             }

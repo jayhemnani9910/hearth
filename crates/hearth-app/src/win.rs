@@ -787,6 +787,10 @@ impl Win {
                 let args = if d["args"].is_object() { d["args"].clone() } else { json!({}) };
                 self.run_action(s, &action, args);
             }
+            "terminal.failed" => {
+                let why = d["reason"].as_str().unwrap_or("");
+                self.toast(s, &format!("{block} was closed after an internal error: {why}"));
+            }
             "config.reloaded" => self.load_config(s),
             "server.stopping" => {
                 self.ui.banner.set_title("The server is stopping");

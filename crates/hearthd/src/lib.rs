@@ -10,3 +10,4 @@ pub mod pty;
 pub mod remote;
 pub mod server;
 pub mod state;
+pub mod sync;

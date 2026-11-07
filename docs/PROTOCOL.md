@@ -81,7 +81,8 @@ contiguous and increasing.
 Bus events: `session.changed`, `session.closed`, `terminal.title`,
 `terminal.cwd`, `terminal.status`, `terminal.prompt`, `terminal.bell`,
 `terminal.clipboard`, `terminal.activity` (at most 1/s per block),
-`terminal.exit`, `terminal.eof`, `client.connected`, `client.disconnected`,
+`terminal.exit`, `terminal.eof`, `terminal.failed` (an internal error closed
+the terminal), `client.connected`, `client.disconnected`,
 `config.reloaded`, `server.stopping`.
 
 Per-connection events have no `seq` and travel in order with that

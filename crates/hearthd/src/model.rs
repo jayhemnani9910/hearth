@@ -2,6 +2,7 @@
 //! its reply authority, and the serializer that turns its state into a
 //! byte snapshot a fresh emulator can restore exactly.
 
+use crate::sync::Lock;
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Grid};
 use alacritty_terminal::index::{Column, Line};
@@ -70,7 +71,7 @@ pub fn default_color(i: usize) -> Rgb {
 
 impl EventListener for Listener {
     fn send_event(&self, event: Event) {
-        let mut s = self.0.lock().unwrap();
+        let mut s = self.0.lk();
         let fx = match event {
             Event::PtyWrite(text) => Effect::Reply(text.into_bytes()),
             Event::Title(t) => Effect::Title(Some(t)),
@@ -155,7 +156,7 @@ impl Model {
     }
 
     pub fn set_cell_size(&mut self, w: u16, h: u16) {
-        let mut s = self.shared.lock().unwrap();
+        let mut s = self.shared.lk();
         s.cell_w = w;
         s.cell_h = h;
     }
@@ -163,14 +164,14 @@ impl Model {
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.term.resize(size(cols, rows));
         self.scroll_region = None;
-        let mut s = self.shared.lock().unwrap();
+        let mut s = self.shared.lk();
         s.cols = cols;
         s.rows = rows;
     }
 
     /// Drains pending effects. Call after every `advance`.
     pub fn take_effects(&mut self) -> Vec<Effect> {
-        let fx = std::mem::take(&mut self.shared.lock().unwrap().effects);
+        let fx = std::mem::take(&mut self.shared.lk().effects);
         for e in &fx {
             if let Effect::Title(t) = e {
                 self.title = t.clone();
@@ -180,7 +181,7 @@ impl Model {
     }
 
     fn push_effect(&self, e: Effect) {
-        self.shared.lock().unwrap().effects.push(e);
+        self.shared.lk().effects.push(e);
     }
 
     pub fn advance(&mut self, bytes: &[u8]) {

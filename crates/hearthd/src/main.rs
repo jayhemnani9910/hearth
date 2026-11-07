@@ -3,6 +3,7 @@
 
 use hearth_core::paths;
 use hearthd::server::{Options, Server};
+use hearthd::sync::Lock;
 use hearthd::{lua, persist, remote};
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
@@ -107,8 +108,8 @@ fn main() {
         }
     }
     server.opts.persist.store(persist_ok, Ordering::Relaxed);
-    *server.opts.listen.lock().unwrap() = all_listen.clone();
-    server.core.lock().unwrap().dirty = true;
+    *server.opts.listen.lk() = all_listen.clone();
+    server.core.lk().dirty = true;
 
     {
         let s = server.clone();
@@ -117,7 +118,11 @@ fn main() {
             .spawn(move || {
                 let mut activity = HashMap::new();
                 for n in notices {
-                    s.handle_notice(n, &mut activity);
+                    // A bug in one notice must not stop events for everyone.
+                    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.handle_notice(n, &mut activity)));
+                    if r.is_err() {
+                        eprintln!("hearthd: an event failed to process; continuing");
+                    }
                 }
             })
             .unwrap();

@@ -2,6 +2,7 @@
 //! that does not fit marks the subscription lost (the viewer must
 //! re-attach), and control frames that do not fit close the connection.
 
+use crate::sync::Lock;
 use hearth_core::proto::{self, Frame};
 use serde_json::json;
 use std::io::Write;
@@ -45,7 +46,7 @@ impl ConnOut {
 
     pub fn close(&self, reason: &str) {
         if !self.closed.swap(true, Ordering::Relaxed) {
-            *self.close_reason.lock().unwrap() = Some(reason.to_string());
+            *self.close_reason.lk() = Some(reason.to_string());
             // Wake the writer so it notices.
             let _ = self.tx.try_send(Frame::Json(json!({"type": "close", "reason": reason})));
         }
@@ -79,7 +80,7 @@ impl ConnOut {
         }
         let n = frame_len(frame);
         if self.queued.load(Ordering::Relaxed) + n > QUEUE_BYTES {
-            self.lost.lock().unwrap().push(sub);
+            self.lost.lk().push(sub);
             return false;
         }
         let f = match frame {
@@ -92,7 +93,7 @@ impl ConnOut {
                 true
             }
             Err(TrySendError::Full(_)) => {
-                self.lost.lock().unwrap().push(sub);
+                self.lost.lk().push(sub);
                 false
             }
             Err(TrySendError::Disconnected(_)) => false,
@@ -117,7 +118,7 @@ impl ConnOut {
                     break;
                 }
             }
-            let lost: Vec<u32> = std::mem::take(&mut *self.lost.lock().unwrap());
+            let lost: Vec<u32> = std::mem::take(&mut *self.lost.lk());
             for sub in lost {
                 let ev = Frame::Json(json!({"type": "event", "event": "terminal.lost", "data": {"sub": sub, "reason": "viewer queue overflow; re-attach for a fresh snapshot"}}));
                 let _ = buf.write_all(&proto::encode(&ev));

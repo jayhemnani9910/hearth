@@ -1,6 +1,7 @@
 //! A terminal block: PTY, child process, canonical model, output ring and
 //! the viewers subscribed to it.
 
+use crate::sync::Lock;
 use crate::conn::ConnOut;
 use crate::model::{Effect, Model};
 use crate::pty::{self, SpawnSpec};
@@ -68,6 +69,21 @@ pub enum Notice {
     Effects(String, Vec<Effect>),
     Exit(String, ExitInfo),
     Eof(String),
+    /// The reader thread panicked; the block's state can't be trusted.
+    Failed(String, String),
+}
+
+/// Debug builds only: panics on output containing `$HEARTH_TEST_PANIC_ON`,
+/// so tests can check that one failing terminal leaves the rest running.
+fn test_panic(bytes: &[u8]) {
+    if cfg!(debug_assertions) {
+        static MARK: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+        if let Some(m) = MARK.get_or_init(|| std::env::var("HEARTH_TEST_PANIC_ON").ok().filter(|m| !m.is_empty())) {
+            if bytes.windows(m.len()).any(|w| w == m.as_bytes()) {
+                panic!("test panic on output marker");
+            }
+        }
+    }
 }
 
 pub fn now_ms() -> u64 {
@@ -114,13 +130,21 @@ impl Block {
         })?;
         let b = block.clone();
         let n = notify.clone();
-        std::thread::Builder::new().name(format!("pty-r-{id}")).spawn(move || b.read_loop(reader, n))?;
+        std::thread::Builder::new().name(format!("pty-r-{id}")).spawn(move || {
+            // A bug triggered by one program's output must not end the others.
+            let id = b.id.clone();
+            let n2 = n.clone();
+            if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| b.read_loop(reader, n))) {
+                let why = e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_else(|| "unknown panic".into());
+                let _ = n2.send(Notice::Failed(id, why));
+            }
+        })?;
         let b = block.clone();
         std::thread::Builder::new().name(format!("wait-{id}")).spawn(move || {
             let (code, signal) = pty::wait(b.pid);
             let info = ExitInfo { code, signal, at_ms: now_ms() };
             let changed = {
-                let mut inner = b.inner.lock().unwrap();
+                let mut inner = b.inner.lk();
                 inner.exit = Some(info.clone());
                 inner.model.on_child_exit()
             };
@@ -163,7 +187,7 @@ impl Block {
             }
         }
         {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lk();
             inner.model.finish();
             inner.eof = true;
         }
@@ -173,7 +197,8 @@ impl Block {
     /// Appends output to the stream: ring, model, then every viewer, all
     /// under one lock so attach can never interleave with it.
     fn ingest(&self, bytes: &[u8]) -> Vec<Effect> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lk();
+        test_panic(bytes);
         let offset = inner.total;
         inner.total += bytes.len() as u64;
         inner.ring.extend(bytes);
@@ -190,7 +215,7 @@ impl Block {
     }
 
     pub fn write_input(&self, bytes: Vec<u8>) {
-        let _ = self.input.lock().unwrap().send(bytes);
+        let _ = self.input.lk().send(bytes);
     }
 
     pub fn master_fd(&self) -> i32 {
@@ -209,7 +234,7 @@ impl Block {
     /// Subscribes a viewer. Sends either the retained bytes after `resume`
     /// or a snapshot plus the bytes after its offset. Returns attach info.
     pub fn attach(&self, conn: &Arc<ConnOut>, sub: u32, client: &str, resume: Option<(&str, u64)>, pref: Option<(u16, u16, u16, u16)>) -> Value {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lk();
         // A size given here counts as reporting one: an owner's (or the first
         // viewer's) size applies before the snapshot, so it is taken at the
         // size this viewer will draw.
@@ -257,7 +282,7 @@ impl Block {
     }
 
     pub fn detach(&self, conn_id: u64, sub: Option<u32>) -> bool {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lk();
         let before = inner.subs.len();
         inner.subs.retain(|s| !(s.conn.id == conn_id && sub.is_none_or(|x| x == s.sub)));
         before != inner.subs.len()
@@ -287,7 +312,7 @@ impl Block {
 
     /// Size ownership: the owner's preference wins. Returns true on change.
     pub fn set_owner_and_size(&self, client: &str) -> bool {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lk();
         inner.owner = Some(client.to_string());
         let pref = inner.subs.iter().find(|s| s.client == client).and_then(|s| s.pref);
         match pref {
@@ -297,7 +322,7 @@ impl Block {
     }
 
     pub fn set_pref(&self, conn_id: u64, sub: u32, pref: (u16, u16, u16, u16)) -> (bool, Option<String>) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lk();
         let mut client = None;
         for s in inner.subs.iter_mut() {
             if s.conn.id == conn_id && s.sub == sub {
@@ -316,7 +341,7 @@ impl Block {
     /// Releases ownership held by a departing client; the next viewer with
     /// a preference becomes owner.
     pub fn release_owner(&self, client: &str) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lk();
         if inner.owner.as_deref() == Some(client) {
             let next = inner.subs.iter().find(|s| s.client != client && s.pref.is_some()).map(|s| (s.client.clone(), s.pref.unwrap()));
             inner.owner = next.as_ref().map(|n| n.0.clone());
@@ -327,14 +352,14 @@ impl Block {
     }
 
     pub fn resize_direct(&self, cols: u16, rows: u16) -> bool {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lk();
         self.apply_size(&mut inner, cols, rows, (8, 16))
     }
 
     /// Terminates the process group: SIGHUP, then SIGKILL after a grace.
     pub fn kill(self: &Arc<Self>) {
         {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lk();
             if inner.exit.is_some() {
                 return;
             }
@@ -347,7 +372,7 @@ impl Block {
         let b = self.clone();
         std::thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_secs(3);
-            let mut inner = b.inner.lock().unwrap();
+            let mut inner = b.inner.lk();
             while inner.exit.is_none() {
                 let left = deadline.saturating_duration_since(Instant::now());
                 if left.is_zero() {
@@ -365,7 +390,7 @@ impl Block {
     /// Wait for the child to exit (or timeout).
     pub fn wait_exit(&self, timeout: Option<Duration>) -> Option<ExitInfo> {
         let deadline = timeout.map(|t| Instant::now() + t);
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lk();
         loop {
             if let Some(e) = &inner.exit {
                 return Some(e.clone());
@@ -386,7 +411,7 @@ impl Block {
     /// Metadata reported for this block. Sources are named because they can
     /// be absent or stale.
     pub fn info(&self) -> Value {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lk();
         let fg = pty::foreground_pgrp(self.master_fd());
         let fg_name = fg.and_then(pty::proc_name);
         let proc_cwd = if inner.exit.is_none() { pty::proc_cwd(fg.unwrap_or(self.pid)) } else { None };

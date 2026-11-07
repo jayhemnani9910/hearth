@@ -1,6 +1,7 @@
 //! Server core: connections, handshake, event bus, block lifecycle and
 //! persistence. API methods live in api.rs.
 
+use crate::sync::Lock;
 use crate::block::{self, Block, ExitInfo, Notice, now_ms};
 use crate::conn::ConnOut;
 use crate::lua::{self, Engine};
@@ -220,13 +221,13 @@ impl Server {
                 let due = activity.get(&id).is_none_or(|t| now.duration_since(*t) > Duration::from_secs(1));
                 if due {
                     activity.insert(id.clone(), now);
-                    let mut core = self.core.lock().unwrap();
+                    let mut core = self.core.lk();
                     Self::emit(&mut core, "terminal.activity", json!({"block": id}));
                 }
             }
             Notice::Effects(id, fx) => {
-                let block = { self.core.lock().unwrap().blocks.get(&id).cloned() };
-                let mut core = self.core.lock().unwrap();
+                let block = { self.core.lk().blocks.get(&id).cloned() };
+                let mut core = self.core.lk();
                 for e in fx {
                     match e {
                         Effect::Title(t) => Self::emit(&mut core, "terminal.title", json!({"block": id, "title": t})),
@@ -236,7 +237,7 @@ impl Server {
                         }
                         Effect::StatusChanged => {
                             if let Some(b) = &block {
-                                let inner = b.inner.lock().unwrap();
+                                let inner = b.inner.lk();
                                 let data = json!({"block": id, "records": inner.model.status.records(), "summary": inner.model.status.summary()});
                                 drop(inner);
                                 Self::emit(&mut core, "terminal.status", data);
@@ -250,7 +251,7 @@ impl Server {
                 }
             }
             Notice::Exit(id, info) => {
-                let mut core = self.core.lock().unwrap();
+                let mut core = self.core.lk();
                 let info: &ExitInfo = &info;
                 Self::emit(&mut core, "terminal.exit", json!({"block": id, "code": info.code, "signal": info.signal}));
                 if core.close_on_exit.contains(&id) {
@@ -258,8 +259,14 @@ impl Server {
                 }
             }
             Notice::Eof(id) => {
-                let mut core = self.core.lock().unwrap();
+                let mut core = self.core.lk();
                 Self::emit(&mut core, "terminal.eof", json!({"block": id}));
+            }
+            Notice::Failed(id, why) => {
+                eprintln!("hearthd: terminal {id} failed ({why}); closing it");
+                let mut core = self.core.lk();
+                Self::emit(&mut core, "terminal.failed", json!({"block": id, "reason": why}));
+                Self::kill_blocks(&mut core, std::slice::from_ref(&id));
             }
         }
     }
@@ -296,7 +303,7 @@ impl Server {
         }
         let client_id = format!("c{conn_id}");
         {
-            let mut core = self.core.lock().unwrap();
+            let mut core = self.core.lk();
             core.clients.insert(conn_id, ClientInfo {
                 id: client_id.clone(),
                 conn: out.clone(),
@@ -368,7 +375,7 @@ impl Server {
 
     fn on_input(&self, ctx: &Ctx, sub: u32, seq: u64, bytes: Vec<u8>) {
         let (block, client) = {
-            let core = self.core.lock().unwrap();
+            let core = self.core.lk();
             let Some(c) = core.clients.get(&ctx.conn_id) else { return };
             let Some(bid) = c.subs.get(&sub) else { return };
             (core.blocks.get(bid).cloned(), c.id.clone())
@@ -379,7 +386,7 @@ impl Server {
             return;
         };
         // The client that types owns the terminal size.
-        let owner_changed = { block.inner.lock().unwrap().owner.as_deref() != Some(client.as_str()) };
+        let owner_changed = { block.inner.lk().owner.as_deref() != Some(client.as_str()) };
         if owner_changed {
             block.set_owner_and_size(&client);
         }
@@ -389,7 +396,7 @@ impl Server {
 
     fn drop_client(&self, conn_id: u64) {
         let info = {
-            let mut core = self.core.lock().unwrap();
+            let mut core = self.core.lk();
             core.subscribers.retain(|c| c.id != conn_id);
             core.clients.remove(&conn_id).map(|c| {
                 let blocks: Vec<Arc<Block>> = c.subs.values().filter_map(|b| core.blocks.get(b).cloned()).collect();
@@ -401,7 +408,7 @@ impl Server {
                 b.detach(conn_id, None);
                 b.release_owner(&cid);
             }
-            let mut core = self.core.lock().unwrap();
+            let mut core = self.core.lk();
             Self::emit(&mut core, "client.disconnected", json!({"client": cid}));
         }
     }
@@ -411,7 +418,7 @@ impl Server {
             return;
         }
         let snapshot = {
-            let mut core = self.core.lock().unwrap();
+            let mut core = self.core.lk();
             if !core.dirty {
                 return;
             }
@@ -424,7 +431,7 @@ impl Server {
     }
 
     pub fn idle(&self) -> bool {
-        let core = self.core.lock().unwrap();
+        let core = self.core.lk();
         core.blocks.is_empty() && core.clients.is_empty()
     }
 }

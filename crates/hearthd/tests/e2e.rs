@@ -64,6 +64,8 @@ impl Daemon {
             ("HEARTH_SOCKET".into(), dir.join("s.sock").display().to_string()),
             ("HEARTH_STATE_DIR".into(), dir.join("state").display().to_string()),
             ("HEARTH_CONFIG_DIR".into(), dir.join("cfg").display().to_string()),
+            // Debug builds panic on this output (see block.rs `test_panic`).
+            ("HEARTH_TEST_PANIC_ON".into(), "HEARTH-TEST-PANIC-7f3a".into()),
         ]
     }
 
@@ -870,4 +872,39 @@ fn server_stop_ends_programs_but_keeps_the_layout() {
     assert_eq!(view["blocks"].as_object().unwrap().len(), 1);
     drop(d2);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_crashing_terminal_leaves_the_others_running() {
+    let d = Daemon::new(None);
+    let (c, rx) = d.client();
+    call(&c, "events.subscribe", json!({}));
+    let bad = new_session(&c, sh("sleep 0.3; echo HEARTH-TEST-PANIC-$((6+1))f3a; sleep 600"));
+    let good = new_session(&c, json!(["sh"]));
+    let good_pid = call(&c, "block.info", json!({"block": good}))["pid"].clone();
+    // The bad block's reader panics while holding its lock; only it closes.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut failed = false;
+    while !failed {
+        assert!(Instant::now() < deadline, "no terminal.failed event");
+        if let Ok(Incoming::Event(v)) = rx.recv_timeout(Duration::from_millis(200)) {
+            failed = v["event"] == "terminal.failed" && v["data"]["block"] == bad.as_str();
+        }
+    }
+    let bad_pid = call(&c, "block.info", json!({"block": bad}))["pid"].as_i64().unwrap() as i32;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let info = call(&c, "block.info", json!({"block": bad}));
+        if info["running"] == false && info["location"].is_null() && unsafe { libc::kill(bad_pid, 0) } != 0 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "failed block was not closed: {info}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // Everything else still works, including locks the panic touched.
+    assert_eq!(call(&c, "block.info", json!({"block": good}))["pid"], good_pid);
+    call(&c, "terminal.send_text", json!({"block": good, "text": "echo alive-$((40+2))\r"}));
+    wait_text(&c, &good, "alive-42");
+    let (c2, _rx2) = d.client();
+    assert_eq!(call(&c2, "session.list", json!({})).as_array().unwrap().len(), 1);
 }
