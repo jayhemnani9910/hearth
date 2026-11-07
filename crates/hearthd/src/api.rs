@@ -166,6 +166,26 @@ impl Server {
         Server::find_block(&self.core.lk(), id)
     }
 
+    /// Who made a request, for the close log.
+    fn who(core: &Core, ctx: &Ctx) -> String {
+        match core.clients.get(&ctx.conn_id) {
+            Some(c) => format!("{} ({} {}, {} via {})", c.id, c.kind, c.name, c.principal, c.transport),
+            None => "the server (config action or internal)".into(),
+        }
+    }
+
+    /// "b18 bash, b20 vim": the terminals being closed and what they run.
+    fn describe_blocks(core: &Core, ids: &[String]) -> String {
+        let v: Vec<String> = ids
+            .iter()
+            .map(|id| match core.blocks.get(id) {
+                Some(b) => format!("{id} {}", b.foreground_pgrp().and_then(crate::pty::proc_name).unwrap_or_else(|| b.spec.argv.first().cloned().unwrap_or_default())),
+                None => id.clone(),
+            })
+            .collect();
+        if v.is_empty() { "no terminals".into() } else { v.join(", ") }
+    }
+
     pub(crate) fn kill_blocks(core: &mut Core, ids: &[String]) {
         for id in ids {
             if let Some(b) = core.blocks.get(id).cloned() {
@@ -215,6 +235,7 @@ impl Server {
                 self.opts.persist.store(false, std::sync::atomic::Ordering::Relaxed);
                 let mut core = self.core.lk();
                 let ids: Vec<String> = core.blocks.keys().cloned().collect();
+                eprintln!("hearthd: server stop ({}) requested by {}", Self::describe_blocks(&core, &ids), Self::who(&core, ctx));
                 Self::kill_blocks(&mut core, &ids);
                 Server::emit(&mut core, "server.stopping", json!({}));
                 self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -272,6 +293,8 @@ impl Server {
                 for w in &core.s.session(&sid)?.windows {
                     w.layout.leaves(&mut ids);
                 }
+                let name = core.s.session(&sid)?.name.clone();
+                eprintln!("hearthd: closed session {sid} {name:?} ({}) by {}", Self::describe_blocks(&core, &ids), Self::who(&core, ctx));
                 Self::kill_blocks(&mut core, &ids);
                 core.s.sessions.retain(|x| x.id != sid);
                 Server::emit_session(&mut core, &sid);
@@ -297,7 +320,10 @@ impl Server {
                 let mut core = self.core.lk();
                 let (sid, wid) = core.s.resolve_window(s(p, "window")?)?;
                 let mut ids = vec![];
-                core.s.window_mut(&sid, &wid)?.layout.leaves(&mut ids);
+                let w = core.s.window_mut(&sid, &wid)?;
+                w.layout.leaves(&mut ids);
+                let name = w.name.clone();
+                eprintln!("hearthd: closed tab {wid} {name:?} in session {sid} ({}) by {}", Self::describe_blocks(&core, &ids), Self::who(&core, ctx));
                 Self::kill_blocks(&mut core, &ids);
                 ok()
             }
@@ -334,6 +360,7 @@ impl Server {
                 if !core.blocks.contains_key(&id) {
                     return Err(ApiError::new(code::NOT_FOUND, format!("no running block '{id}'")));
                 }
+                eprintln!("hearthd: closed terminal {} by {}", Self::describe_blocks(&core, std::slice::from_ref(&id)), Self::who(&core, ctx));
                 Self::kill_blocks(&mut core, &[id]);
                 ok()
             }

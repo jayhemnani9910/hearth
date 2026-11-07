@@ -933,3 +933,20 @@ fn closed_terminals_release_their_threads_and_files() {
     // A closed terminal still reports how it ended.
     assert_eq!(call(&c, "block.info", json!({"block": b}))["running"], false);
 }
+
+#[test]
+fn closes_are_logged_with_what_and_who() {
+    let d = Daemon::new(None);
+    let (c, _rx) = d.client();
+    let me = c.welcome["client_id"].as_str().unwrap().to_string();
+    let v = call(&c, "session.create", json!({"name": "logged", "command": ["sleep", "600"]}));
+    let b = v["block"].as_str().unwrap().to_string();
+    let w2 = call(&c, "window.create", json!({"session": "logged", "name": "second", "command": ["sleep", "601"]}));
+    call(&c, "window.close", json!({"window": w2["window"]}));
+    call(&c, "block.close", json!({"block": b}));
+    let log = std::fs::read_to_string(d.dir.join("daemon.log")).unwrap();
+    let tab = log.lines().find(|l| l.contains("closed tab")).unwrap_or_else(|| panic!("no tab close in log:\n{log}"));
+    assert!(tab.contains("\"second\"") && tab.contains("sleep") && tab.contains(&format!("by {me} (app e2e, uid:")), "{tab}");
+    let term = log.lines().find(|l| l.contains("closed terminal")).unwrap_or_else(|| panic!("no terminal close in log:\n{log}"));
+    assert!(term.contains(&b) && term.contains("sleep") && term.contains(&me), "{term}");
+}
