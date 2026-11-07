@@ -42,6 +42,15 @@ bytes, and require identical state. The tests split at every byte offset.
   thread.
 - Killing a block sends `SIGHUP` to its process group, then `SIGKILL` after
   3 s.
+- A closed block releases its PTY, writer thread, output ring and
+  scrollback. The last 256 stay listed with their exit status and last
+  screen, for `block.info` and `terminal.wait`.
+- Memory: a live terminal costs up to about 23 MB (4 MiB ring plus 10,000
+  lines of history at 80 columns). `packaging/soak.sh` measures memory,
+  threads and files across open/flood/close cycles. glibc is limited to two
+  memory pools, so memory freed by closed terminals is reused.
+- A panic in one block's reader closes that block only; locks recover from
+  poisoning (`sync.rs`).
 
 ## D4. Snapshot / stream boundary
 

@@ -51,6 +51,11 @@ probe and the `test-*` actions exist only when `HEARTH_APP_PROBE` is set.
   still arrive).
 - No shared/login server modes, no PAM gateway, no embedded Tailscale, no
   floating layers, no block plugin API.
+- Memory (`packaging/soak.sh`, 10 terminals x 5 MB x 10 cycles, release
+  build): threads and open files return to baseline after every cycle;
+  resident memory with everything closed grew from 5 MB to about 50 MB,
+  mostly from the bounded list of closed terminals. No soak longer than
+  minutes, and nothing above 20 terminals, has been run.
 - No survival guarantee across logout: it depends on systemd lingering and
   is untested.
 - Another OS user being denied by `SO_PEERCRED` is implemented but untested,

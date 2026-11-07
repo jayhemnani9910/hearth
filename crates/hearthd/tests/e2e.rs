@@ -908,3 +908,28 @@ fn a_crashing_terminal_leaves_the_others_running() {
     let (c2, _rx2) = d.client();
     assert_eq!(call(&c2, "session.list", json!({})).as_array().unwrap().len(), 1);
 }
+
+#[test]
+fn closed_terminals_release_their_threads_and_files() {
+    let d = Daemon::new(None);
+    let (c, _rx) = d.client();
+    let pid = d.child.as_ref().unwrap().id();
+    let count = |what: &str| std::fs::read_dir(format!("/proc/{pid}/{what}")).unwrap().count();
+    // A first terminal settles one-time threads (Lua, accept, ...).
+    let b = new_session(&c, sh("sleep 3600"));
+    call(&c, "block.close", json!({"block": b}));
+    std::thread::sleep(Duration::from_millis(500));
+    let (threads, fds) = (count("task"), count("fd"));
+    for _ in 0..10 {
+        let b = new_session(&c, sh("echo hi; sleep 3600"));
+        wait_text(&c, &b, "hi");
+        call(&c, "block.close", json!({"block": b}));
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while (count("task"), count("fd")) != (threads, fds) {
+        assert!(Instant::now() < deadline, "threads {} (was {threads}), fds {} (was {fds})", count("task"), count("fd"));
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // A closed terminal still reports how it ended.
+    assert_eq!(call(&c, "block.info", json!({"block": b}))["running"], false);
+}

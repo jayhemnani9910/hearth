@@ -36,7 +36,7 @@ pub fn capture(core: &Core) -> Saved {
     for id in core.s.all_blocks() {
         if let Some(b) = core.blocks.get(&id) {
             let inner = b.inner.lk();
-            let cwd = inner.model.cwd.clone().or_else(|| crate::pty::proc_cwd(crate::pty::foreground_pgrp(b.master_fd()).unwrap_or(b.pid)));
+            let cwd = inner.model.cwd.clone().or_else(|| crate::pty::proc_cwd(b.foreground_pgrp().unwrap_or(b.pid)));
             blocks.insert(id, SavedBlock { argv: b.spec.argv.clone(), cwd, title: inner.model.title.clone() });
         }
     }

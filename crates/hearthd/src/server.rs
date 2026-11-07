@@ -44,6 +44,8 @@ pub struct Core {
     pub event_seq: u64,
     pub subscribers: Vec<Arc<ConnOut>>,
     pub dirty: bool,
+    /// Terminals were freed: return the memory to the OS (main loop).
+    pub trim_due: bool,
     /// new block id -> block id it replaced at restore
     pub restored_from: HashMap<String, String>,
 }
@@ -103,6 +105,7 @@ impl Server {
                 event_seq: 0,
                 subscribers: Vec::new(),
                 dirty: false,
+                trim_due: false,
                 restored_from: HashMap::new(),
             }),
             notify: tx,
@@ -201,8 +204,10 @@ impl Server {
 
     /// Takes a block out of the layout and its process table entry.
     pub fn retire_block(core: &mut Core, id: &str) {
+        core.trim_due = true;
         let removed = core.s.remove_block(id);
         if let Some(b) = core.blocks.remove(id) {
+            b.release();
             core.finished.push_back(b);
             while core.finished.len() > 256 {
                 core.finished.pop_front();

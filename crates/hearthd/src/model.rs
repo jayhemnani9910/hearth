@@ -161,6 +161,11 @@ impl Model {
         s.cell_h = h;
     }
 
+    /// Drops the scrollback, keeping the screen (for retired terminals).
+    pub fn drop_history(&mut self) {
+        self.term.grid_mut().clear_history();
+    }
+
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.term.resize(size(cols, rows));
         self.scroll_region = None;

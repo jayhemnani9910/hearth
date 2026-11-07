@@ -57,8 +57,9 @@ pub struct Block {
     pub start_time: Option<u64>,
     pub spec: SpawnSpec,
     pub created_ms: u64,
-    master: OwnedFd,
-    input: Mutex<Sender<Vec<u8>>>,
+    /// Closed (None) once the block is retired.
+    master: Mutex<Option<OwnedFd>>,
+    input: Mutex<Option<Sender<Vec<u8>>>>,
     pub inner: Mutex<Inner>,
     pub exited: Condvar,
 }
@@ -102,8 +103,8 @@ impl Block {
             pid: sp.pid,
             start_time: pty::proc_start_time(sp.pid),
             created_ms: now_ms(),
-            master: sp.master,
-            input: Mutex::new(tx),
+            master: Mutex::new(Some(sp.master)),
+            input: Mutex::new(Some(tx)),
             inner: Mutex::new(Inner {
                 model: Model::new(spec.cols, spec.rows, history),
                 ring: VecDeque::new(),
@@ -215,11 +216,18 @@ impl Block {
     }
 
     pub fn write_input(&self, bytes: Vec<u8>) {
-        let _ = self.input.lk().send(bytes);
+        if let Some(tx) = &*self.input.lk() {
+            let _ = tx.send(bytes);
+        }
     }
 
-    pub fn master_fd(&self) -> i32 {
-        self.master.as_raw_fd()
+    /// Runs `f` with the PTY master, unless the block was retired.
+    pub fn with_master<R>(&self, f: impl FnOnce(i32) -> R) -> Option<R> {
+        self.master.lk().as_ref().map(|m| f(m.as_raw_fd()))
+    }
+
+    pub fn foreground_pgrp(&self) -> Option<i32> {
+        self.with_master(pty::foreground_pgrp).flatten()
     }
 
     /// Ring bytes in `[from, total)`, if still retained.
@@ -296,7 +304,7 @@ impl Block {
         if (inner.model.cols(), inner.model.rows()) == (cols, rows) {
             return false;
         }
-        let _ = pty::set_size(self.master_fd(), cols, rows, cols.saturating_mul(px.0), rows.saturating_mul(px.1));
+        self.with_master(|fd| pty::set_size(fd, cols, rows, cols.saturating_mul(px.0), rows.saturating_mul(px.1)));
         inner.model.resize(cols, rows);
         inner.model.set_cell_size(px.0, px.1);
         let owner = inner.owner.clone();
@@ -357,6 +365,18 @@ impl Block {
     }
 
     /// Terminates the process group: SIGHUP, then SIGKILL after a grace.
+    /// Releases a retired terminal's PTY, writer thread, output ring and
+    /// scrollback; its exit status and last screen stay available.
+    pub fn release(&self) {
+        // Dropping the sender ends the writer thread, which closes its fd.
+        self.input.lk().take();
+        self.master.lk().take();
+        let mut inner = self.inner.lk();
+        inner.ring_start += inner.ring.len() as u64;
+        inner.ring = VecDeque::new();
+        inner.model.drop_history();
+    }
+
     pub fn kill(self: &Arc<Self>) {
         {
             let mut inner = self.inner.lk();
@@ -412,7 +432,7 @@ impl Block {
     /// be absent or stale.
     pub fn info(&self) -> Value {
         let inner = self.inner.lk();
-        let fg = pty::foreground_pgrp(self.master_fd());
+        let fg = self.foreground_pgrp();
         let fg_name = fg.and_then(pty::proc_name);
         let proc_cwd = if inner.exit.is_none() { pty::proc_cwd(fg.unwrap_or(self.pid)) } else { None };
         json!({

@@ -22,6 +22,11 @@ fn peer_uid(fd: i32) -> Option<u32> {
 }
 
 fn main() {
+    // Each terminal has its own reader thread. With glibc's default of one
+    // memory pool per thread, memory freed by closed terminals stays
+    // fragmented across many pools; two pools keep the server's footprint
+    // close to what it actually uses (see packaging/soak.sh).
+    unsafe { libc::mallopt(libc::M_ARENA_MAX, 2) };
     let mut socket = paths::socket_path();
     let mut config = lua::config_path();
     let mut auto_exit = false;
@@ -172,6 +177,11 @@ fn main() {
     while !server.stop.load(Ordering::Relaxed) {
         std::thread::sleep(Duration::from_millis(200));
         server.persist_now();
+        if std::mem::take(&mut server.core.lk().trim_due) {
+            // glibc keeps freed memory in per-thread pools; each terminal had
+            // its own reader thread, so give it back once they are gone.
+            unsafe { libc::malloc_trim(0) };
+        }
         if auto_exit {
             if server.idle() {
                 let t = *idle_since.get_or_insert_with(Instant::now);
