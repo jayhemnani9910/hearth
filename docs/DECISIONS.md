@@ -117,6 +117,42 @@ attached client can never send a second answer.
 - The API registry (`crates/hearthd/src/api.rs`) is the single source for
   dispatch, self-description, schema validation and Lua bindings.
 
+## D11. Desktop client
+
+- One app window holds one connection to one host and shows one session.
+  Tabs are server windows; splits are `GtkPaned`s built from the layout tree.
+  Pane widgets are kept and reparented when the layout changes.
+- The window reacts to `session.changed`; it does not keep its own copy of
+  the layout. Divider drags are sent as ratios (`layout.set_ratio`).
+- A pane attaches once it is laid out, so the attach carries its real size.
+  A snapshot is fed into a VTE grid of the snapshot's size; if the widget is
+  a different size, VTE then resizes it like any terminal.
+- Query sequences are stripped before bytes reach VTE (D5); keystrokes leave
+  through VTE's `commit` signal in order.
+- On link loss the window shows a banner, reconnects with backoff and resumes
+  each pane from its offset. Input that was not acknowledged is reported on
+  the pane and is not resent.
+- Remote control (`client.action`) is off unless the app is started with
+  `--remote-control` or it is enabled from the menu.
+
+## D12. Packaging
+
+- A `.deb` built with `dpkg-deb` (`packaging/build-deb.sh`). Library
+  dependencies come from `dpkg-shlibdeps`.
+- It ships a systemd **user** unit, `hearth.service`. The clients start it
+  on demand; it is not enabled globally. The maintainer scripts do not touch
+  user sessions; after an upgrade they print how to restart.
+- Restarting the server ends its programs; the layout comes back (D9).
+
+## D13. GUI tests
+
+- The real app runs on a headless GTK Broadway display against a real
+  server.
+- Tests drive it with `client.action`. They read its state, including VTE
+  text, from a JSON probe file.
+- The probe and the `test-*` actions exist only when `HEARTH_APP_PROBE` is
+  set.
+
 ## Dependencies (pinned in Cargo.lock)
 
 | Crate | Why | License |
@@ -126,4 +162,4 @@ attached client can never send a second answer.
 | serde, serde_json (preserve_order in CLI) | protocol, settings edits that keep key order | MIT/Apache-2.0 |
 | base64 | OSC 7501 text | MIT/Apache-2.0 |
 | libc | PTY, signals, credentials | MIT/Apache-2.0 |
-| gtk4, libadwaita, vte4 (client, pending) | desktop UI | MIT bindings; GTK/VTE LGPL |
+| gtk4 0.11, libadwaita 0.9, vte4 0.10 | desktop app | MIT bindings; GTK/libadwaita/VTE LGPL |

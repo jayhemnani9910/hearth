@@ -1,0 +1,48 @@
+//! Built-in GUI actions: name and palette title.
+
+pub const BUILTIN: &[(&str, &str)] = &[
+    ("new-tab", "New Tab"),
+    ("new-session", "New Session"),
+    ("new-window", "New Window"),
+    ("split-right", "Split Right"),
+    ("split-down", "Split Down"),
+    ("split-left", "Split Left"),
+    ("split-up", "Split Up"),
+    ("close-pane", "Close Pane"),
+    ("close-tab", "Close Tab"),
+    ("zoom", "Zoom Pane (toggle)"),
+    ("balance", "Balance Panes"),
+    ("take-size", "Take Size Ownership"),
+    ("focus-left", "Focus Pane Left"),
+    ("focus-right", "Focus Pane Right"),
+    ("focus-up", "Focus Pane Up"),
+    ("focus-down", "Focus Pane Down"),
+    ("grow-left", "Move Divider Left"),
+    ("grow-right", "Move Divider Right"),
+    ("grow-up", "Move Divider Up"),
+    ("grow-down", "Move Divider Down"),
+    ("next-tab", "Next Tab"),
+    ("prev-tab", "Previous Tab"),
+    ("rename-tab", "Rename Tab…"),
+    ("rename-session", "Rename Session…"),
+    ("switch-session", "Switch Session…"),
+    ("copy", "Copy"),
+    ("paste", "Paste"),
+    ("select-all", "Select All"),
+    ("font-bigger", "Increase Font Size"),
+    ("font-smaller", "Decrease Font Size"),
+    ("font-reset", "Reset Font Size"),
+    ("reload-config", "Reload Configuration"),
+    ("toggle-remote-control", "Toggle Remote Control"),
+    ("reconnect", "Reconnect"),
+    ("exit-mode", "Leave Key Mode"),
+    ("command-palette", "Command Palette"),
+];
+
+/// Built-ins exposed as `win.<name>` GIO actions (menus, context menu).
+pub const SIMPLE: &[&str] = &[
+    "new-tab", "new-session", "new-window", "split-right", "split-down", "split-left", "split-up", "close-pane",
+    "close-tab", "zoom", "balance", "take-size", "next-tab", "prev-tab", "rename-tab", "rename-session",
+    "switch-session", "copy", "paste", "select-all", "font-bigger", "font-smaller", "font-reset", "reload-config",
+    "reconnect", "command-palette",
+];

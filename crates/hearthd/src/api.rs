@@ -57,7 +57,7 @@ pub fn methods() -> Vec<Method> {
     vec![
         Method { name: "server.version", summary: "Server and protocol version", params: obj(json!({}), &[]), result: obj(json!({"version": t(S, ""), "protocol": t(S, ""), "incarnation": t(S, "")}), &["version", "protocol", "incarnation"]), example: json!({}) },
         Method { name: "server.status", summary: "Server process, listeners, clients and config state", params: obj(json!({}), &[]), result: obj(json!({"pid": t("integer", ""), "sessions": t("integer", ""), "blocks": t("integer", ""), "clients": t("array", "")}), &["pid", "sessions", "blocks", "clients"]), example: json!({}) },
-        Method { name: "server.stop", summary: "Stop the server. Refuses while blocks run unless force is true (their processes are terminated)", params: obj(json!({"force": t("boolean", "")}), &[]), result: ok.clone(), example: json!(null) },
+        Method { name: "server.stop", summary: "Stop the server. Refuses while blocks run unless force is true (their processes are terminated; the layout is kept for the next start)", params: obj(json!({"force": t("boolean", "")}), &[]), result: ok.clone(), example: json!(null) },
         Method { name: "api.list", summary: "List API methods", params: obj(json!({}), &[]), result: t("array", "method names and summaries"), example: json!({}) },
         Method { name: "api.describe", summary: "Describe one method: params/result schemas and an example", params: obj(json!({"method": t(S, "")}), &["method"]), result: obj(json!({"name": t(S, ""), "params": t("object", ""), "result": t("object", "")}), &["name", "params", "result"]), example: json!({"method": "session.list"}) },
         Method { name: "session.list", summary: "List sessions", params: obj(json!({}), &[]), result: t("array", "sessions"), example: json!({}) },
@@ -200,11 +200,19 @@ impl Server {
                 }))
             }
             "server.stop" => {
-                let mut core = self.core.lock().unwrap();
-                let n = core.blocks.len();
-                if n > 0 && p["force"].as_bool() != Some(true) {
-                    return Err(ApiError::new(code::FAILED, format!("{n} terminal(s) still running; stopping ends them. Pass force=true")));
+                {
+                    let mut core = self.core.lock().unwrap();
+                    let n = core.blocks.len();
+                    if n > 0 && p["force"].as_bool() != Some(true) {
+                        return Err(ApiError::new(code::FAILED, format!("{n} terminal(s) still running; stopping ends them. Pass force=true")));
+                    }
+                    core.dirty = true;
                 }
+                // Keep the layout for the next start, as a stop by signal does,
+                // then stop saving so ending the programs does not erase it.
+                self.persist_now();
+                self.opts.persist.store(false, std::sync::atomic::Ordering::Relaxed);
+                let mut core = self.core.lock().unwrap();
                 let ids: Vec<String> = core.blocks.keys().cloned().collect();
                 Self::kill_blocks(&mut core, &ids);
                 Server::emit(&mut core, "server.stopping", json!({}));

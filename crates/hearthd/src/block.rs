@@ -210,6 +210,17 @@ impl Block {
     /// or a snapshot plus the bytes after its offset. Returns attach info.
     pub fn attach(&self, conn: &Arc<ConnOut>, sub: u32, client: &str, resume: Option<(&str, u64)>, pref: Option<(u16, u16, u16, u16)>) -> Value {
         let mut inner = self.inner.lock().unwrap();
+        // A size given here counts as reporting one: an owner's (or the first
+        // viewer's) size applies before the snapshot, so it is taken at the
+        // size this viewer will draw.
+        if let Some((c, r, w, h)) = pref {
+            if inner.owner.is_none() {
+                inner.owner = Some(client.to_string());
+            }
+            if inner.owner.as_deref() == Some(client) {
+                self.apply_size(&mut inner, c, r, (w, h));
+            }
+        }
         let resumed = match resume {
             Some((generation, offset)) if generation == self.generation => Self::ring_from(&inner, offset).map(|b| (offset, b)),
             _ => None,
@@ -217,7 +228,7 @@ impl Block {
         let (cols, rows) = (inner.model.cols(), inner.model.rows());
         let mut info = json!({
             "sub": sub, "block": self.id, "generation": self.generation,
-            "cols": cols, "rows": rows, "total": inner.total,
+            "cols": cols, "rows": rows, "total": inner.total, "owner": inner.owner,
         });
         match resumed {
             Some((offset, bytes)) => {

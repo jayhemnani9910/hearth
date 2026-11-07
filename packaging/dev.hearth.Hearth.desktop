@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Name=Hearth
+GenericName=Terminal
+Comment=Terminal workspace whose programs keep running when the window closes
+Exec=hearth-app
+Icon=dev.hearth.Hearth
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=terminal;shell;tmux;session;remote;ssh;
+StartupNotify=true
+Actions=new-window;
+
+[Desktop Action new-window]
+Name=New Window
+Exec=hearth-app

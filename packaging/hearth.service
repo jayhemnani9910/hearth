@@ -1,0 +1,12 @@
+[Unit]
+Description=Hearth terminal server
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/hearthd
+Restart=on-failure
+# Shells run as children of the server. Stopping or restarting the service
+# ends them; the layout comes back with new shells in the same directories.
+
+[Install]
+WantedBy=default.target

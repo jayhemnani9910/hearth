@@ -845,3 +845,29 @@ fn socket_and_runtime_dir_are_private() {
     std::fs::File::create(&fake).unwrap().write_all(b"x").unwrap();
     assert!(matches!(Client::connect(&Target::Unix(fake), "app", "t"), Err(ConnectError::Rejected(_))));
 }
+
+#[test]
+fn server_stop_ends_programs_but_keeps_the_layout() {
+    let dir = Daemon::dir();
+    let mut d = Daemon::start(dir.clone(), None, &[]);
+    let (c, _rx) = d.client();
+    let v = call(&c, "session.create", json!({"name": "kept"}));
+    let b = v["block"].as_str().unwrap().to_string();
+    let pid = call(&c, "block.info", json!({"block": b}))["pid"].as_i64().unwrap() as i32;
+    assert!(c.call("server.stop", json!({})).is_err(), "refuses without force while terminals run");
+    call(&c, "server.stop", json!({"force": true}));
+    let status = d.child.take().unwrap().wait().unwrap();
+    assert!(status.success());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while unsafe { libc::kill(pid, 0) } == 0 {
+        assert!(Instant::now() < deadline, "program {pid} outlived the server");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let d2 = Daemon::start(dir.clone(), None, &[]);
+    let (c, _rx) = d2.client();
+    let view = call(&c, "session.view", json!({"session": "kept"}));
+    assert_eq!(view["id"], v["session"]);
+    assert_eq!(view["blocks"].as_object().unwrap().len(), 1);
+    drop(d2);
+    let _ = std::fs::remove_dir_all(&dir);
+}

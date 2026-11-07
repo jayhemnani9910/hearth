@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/hearth-core", "crates/hearthd", "crates/hearth-cli"]
+members = ["crates/hearth-core", "crates/hearthd", "crates/hearth-cli", "crates/hearth-app"]
 
 [workspace.package]
 version = "0.1.0"

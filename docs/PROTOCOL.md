@@ -87,7 +87,7 @@ Bus events: `session.changed`, `session.closed`, `terminal.title`,
 Per-connection events have no `seq` and travel in order with that
 connection's Data frames:
 
-- `terminal.attached` `{sub, mode: snapshot|resume, offset, generation, cols, rows}`
+- `terminal.attached` `{sub, mode: snapshot|resume, offset, generation, cols, rows, owner}`
 - `terminal.resized` `{sub, cols, rows, owner, offset}`
 - `terminal.lost` `{sub}`: the viewer fell behind. Re-attach.
 - `input.ack` `{sub, seq, delivered}`
@@ -113,7 +113,9 @@ connection's Data frames:
 ## Size ownership
 
 - The first viewer to report a size for an unowned block, or the viewer that
-  types, owns the block. `block.own` can take, request or release ownership
+  types, owns the block. A size given to `terminal.attach` counts as
+  reporting one; when the viewer owns the block, that size is applied before
+  the snapshot is taken. `block.own` can take, request or release ownership
   explicitly.
 - Only the owner's `terminal.resize` changes the PTY size.
 - If the owner disconnects, ownership passes to another viewer that has a
