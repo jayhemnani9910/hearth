@@ -6,7 +6,15 @@ use crate::{Args, Flags, die};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
-const HOOK_CMD: &str = "hearth agent context";
+/// Claude Code hooks this tool owns: (event, command). The status hooks
+/// show Claude's state on its Hearth tab and notify when it needs you.
+const HOOKS: &[(&str, &str)] = &[
+    ("SessionStart", "hearth agent context"),
+    ("UserPromptSubmit", "hearth agent status working --app claude"),
+    ("PostToolUse", "hearth agent status working --app claude"),
+    ("Notification", "hearth agent status blocked --app claude"),
+    ("Stop", "hearth agent status done --app claude"),
+];
 const MARK_BEGIN: &str = "<!-- hearth:begin -->";
 const MARK_END: &str = "<!-- hearth:end -->";
 const SKILL_MARK: &str = "hearth-managed: true";
@@ -26,9 +34,11 @@ pane the person is looking at. Pass -t to target something else.
   hearth wait -t BLOCK --text 'Listening'  wait for output
   hearth api list / hearth api describe METHOD
 
-Report your state to the terminal with OSC 7501 so the person sees it in
-the tab: printf '\e]7501;state=%s:msg=%s\e\\' working "$(printf %s 'Running tests' | base64 -w0)"
-States: idle working blocked done error. Use blocked when you need the person.
+Report your state so the person sees it on your tab, and gets a desktop
+notification when you need them:
+  hearth agent status working --app NAME -m 'Running tests'
+States: idle working blocked done error. Use blocked when you need the person,
+done when you finish. (This writes OSC 7501 to your terminal.)
 "#;
 
 fn claude_dir(f: &mut Flags) -> PathBuf {
@@ -54,8 +64,8 @@ fn write_atomic(path: &Path, data: &str) -> std::io::Result<()> {
     std::fs::rename(tmp, path)
 }
 
-fn has_our_hook(v: &Value) -> bool {
-    v["hooks"]["SessionStart"].as_array().into_iter().flatten().any(|g| g["hooks"].as_array().into_iter().flatten().any(|h| h["command"] == HOOK_CMD))
+fn has_hook(v: &Value, event: &str, cmd: &str) -> bool {
+    v["hooks"][event].as_array().into_iter().flatten().any(|g| g["hooks"].as_array().into_iter().flatten().any(|h| h["command"] == cmd))
 }
 
 /// Returns the planned new settings text, or None if nothing changes.
@@ -75,32 +85,37 @@ fn claude_settings(path: &Path, install: bool) -> Result<Option<String>, String>
         return Err(format!("{} is not a JSON object; not touching it", path.display()));
     }
     if install {
-        if has_our_hook(&v) {
+        let missing: Vec<_> = HOOKS.iter().filter(|(e, c)| !has_hook(&v, e, c)).collect();
+        if missing.is_empty() {
             return Ok(None);
         }
         if v.get("hooks").is_none() {
             v["hooks"] = json!({});
         }
-        if v["hooks"].get("SessionStart").is_none() {
-            v["hooks"]["SessionStart"] = json!([]);
+        for (event, cmd) in missing {
+            if v["hooks"].get(*event).is_none() {
+                v["hooks"][*event] = json!([]);
+            }
+            v["hooks"][*event]
+                .as_array_mut()
+                .ok_or_else(|| format!("hooks.{event} is not a list"))?
+                .push(json!({"hooks": [{"type": "command", "command": cmd}]}));
         }
-        v["hooks"]["SessionStart"]
-            .as_array_mut()
-            .ok_or("hooks.SessionStart is not a list")?
-            .push(json!({"hooks": [{"type": "command", "command": HOOK_CMD}]}));
     } else {
-        if !has_our_hook(&v) {
+        if !HOOKS.iter().any(|(e, c)| has_hook(&v, e, c)) {
             return Ok(None);
         }
-        if let Some(groups) = v["hooks"]["SessionStart"].as_array_mut() {
-            for g in groups.iter_mut() {
-                if let Some(hs) = g["hooks"].as_array_mut() {
-                    hs.retain(|h| h["command"] != HOOK_CMD);
+        for (event, cmd) in HOOKS {
+            if let Some(groups) = v["hooks"][*event].as_array_mut() {
+                for g in groups.iter_mut() {
+                    if let Some(hs) = g["hooks"].as_array_mut() {
+                        hs.retain(|h| h["command"] != *cmd);
+                    }
                 }
-            }
-            groups.retain(|g| g["hooks"].as_array().is_none_or(|h| !h.is_empty()));
-            if groups.is_empty() {
-                v["hooks"].as_object_mut().unwrap().remove("SessionStart");
+                groups.retain(|g| g["hooks"].as_array().is_none_or(|h| !h.is_empty()));
+                if groups.is_empty() {
+                    v["hooks"].as_object_mut().unwrap().remove(*event);
+                }
             }
         }
         if v["hooks"].as_object().is_some_and(|o| o.is_empty()) {
@@ -156,14 +171,50 @@ fn agents_md(path: &Path, install: bool) -> Result<Option<String>, String> {
     Ok(Some(out))
 }
 
+/// `hearth agent status STATE [--app NAME] [--message TEXT]`, run by agent
+/// hooks: shows the state on this terminal's tab via OSC 7501. The message
+/// is taken from a hook's JSON on stdin (`message`) when not given. Prints
+/// nothing and always succeeds, so it can never disturb the agent; outside
+/// Hearth it does nothing.
+fn status(state: &str, app: Option<String>, mut msg: Option<String>) {
+    use base64::Engine;
+    use std::io::{IsTerminal, Read, Write};
+    if std::env::var_os("HEARTH_BLOCK").is_none() || !matches!(state, "idle" | "working" | "blocked" | "done" | "error") {
+        return;
+    }
+    if msg.is_none() && !std::io::stdin().is_terminal() {
+        let mut input = String::new();
+        let _ = std::io::stdin().take(1 << 20).read_to_string(&mut input);
+        msg = serde_json::from_str::<Value>(&input).ok().and_then(|v| v["message"].as_str().map(String::from));
+    }
+    let mut osc = format!("\x1b]7501;state={state}");
+    if let Some(a) = app.filter(|a| !a.is_empty() && !a.contains([':', ';', '\x1b', '\x07'])) {
+        osc.push_str(&format!(":app={a}"));
+    }
+    if let Some(m) = msg.filter(|m| !m.is_empty()) {
+        osc.push_str(&format!(":msg={}", base64::engine::general_purpose::STANDARD.encode(m.chars().take(500).collect::<String>())));
+    }
+    osc.push_str("\x1b\\");
+    // The agent's terminal, even when the hook's own output is captured.
+    if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
+        let _ = tty.write_all(osc.as_bytes());
+    }
+}
+
 pub fn main(args: &Args, rest: &[String]) {
     let mut f = Flags::new(rest);
     let which = f.opt(&["--agent"]).unwrap_or("all".into());
     let dry = f.has(&["--dry-run"]);
     let cdir = claude_dir(&mut f);
     let xdir = codex_dir(&mut f);
+    let app = f.opt(&["--app"]);
+    let message = f.opt(&["--message", "-m"]);
     let pos = f.positional();
     let sub = pos.first().map(|s| s.as_str()).unwrap_or("");
+    if sub == "status" {
+        status(pos.get(1).map(|s| s.as_str()).unwrap_or(""), app, message);
+        return;
+    }
     if sub == "context" {
         // Run by agent session hooks: tell the agent where it is.
         if let (Ok(s), Ok(b)) = (std::env::var("HEARTH_SESSION"), std::env::var("HEARTH_BLOCK")) {
@@ -174,7 +225,7 @@ pub fn main(args: &Args, rest: &[String]) {
     let install = match sub {
         "setup" | "install" => true,
         "remove" | "uninstall" => false,
-        _ => die(2, "usage: hearth agent setup|remove|context [--agent claude|codex|all] [--dry-run]"),
+        _ => die(2, "usage: hearth agent setup|remove|context|status STATE [--agent claude|codex|all] [--dry-run]"),
     };
     if !matches!(which.as_str(), "claude" | "codex" | "all") {
         die(2, "--agent must be claude, codex or all");

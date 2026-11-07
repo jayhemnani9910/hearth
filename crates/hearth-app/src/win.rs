@@ -816,10 +816,13 @@ impl Win {
                     p.info["status_summary"] = d["summary"].clone();
                     refresh_pane_header(p, &s.client_id);
                     let summary = d["summary"].as_str().unwrap_or("").to_string();
-                    let msg = d["records"].as_array().and_then(|r| r.iter().find_map(|x| x["message"].as_str().map(String::from)));
+                    // The record behind the summary names the agent and says why.
+                    let rec = d["records"].as_array().and_then(|r| r.iter().find(|x| x["state"] == summary.as_str())).cloned().unwrap_or_default();
+                    let app = rec["app"].as_str().filter(|a| !a.is_empty()).map(String::from);
+                    let msg = rec["msg"].as_str().filter(|m| !m.is_empty()).map(String::from);
                     self.refresh_tabs(s);
                     if matches!(summary.as_str(), "blocked" | "error" | "done") {
-                        self.notify(s, &block, &summary, msg);
+                        self.notify(s, &block, &summary, app, msg);
                     }
                 }
             }
@@ -886,11 +889,11 @@ impl Win {
         }
     }
 
-    fn notify(self: &Rc<Win>, s: &mut State, block: &str, summary: &str, msg: Option<String>) {
+    fn notify(self: &Rc<Win>, s: &mut State, block: &str, summary: &str, app: Option<String>, msg: Option<String>) {
         if self.pane_visible_and_active(s, block) {
             return;
         }
-        let title = s.panes.get(block).map(|p| pane_title(&p.info, block)).unwrap_or_else(|| block.to_string());
+        let title = app.unwrap_or_else(|| s.panes.get(block).map(|p| pane_title(&p.info, block)).unwrap_or_else(|| block.to_string()));
         let head = match summary {
             "blocked" => format!("{title} needs your attention"),
             "error" => format!("{title} reported an error"),
@@ -904,7 +907,7 @@ impl Win {
         if let Some(app) = self.ui.window.application() {
             app.send_notification(Some(&format!("hearth-{block}")), &n);
         }
-        s.notified.push(format!("{block}: {head}"));
+        s.notified.push(format!("{block}: {head}{}", msg.map(|m| format!(" | {m}")).unwrap_or_default()));
     }
 
     fn pane_visible_and_active(&self, s: &State, block: &str) -> bool {

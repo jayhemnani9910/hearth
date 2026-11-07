@@ -650,6 +650,9 @@ fn p15_agent_setup_is_idempotent_and_reversible() {
     assert!(pos.windows(2).all(|w| w[0] < w[1]), "unrelated keys and their order preserved:\n{s1}");
     assert_eq!(v["hooks"]["PreToolUse"][0]["hooks"][0]["command"], "mine");
     assert!(s1.contains("hearth agent context"));
+    for (event, state) in [("UserPromptSubmit", "working"), ("Notification", "blocked"), ("Stop", "done")] {
+        assert!(v["hooks"][event].to_string().contains(&format!("hearth agent status {state}")), "{event} hook missing:\n{s1}");
+    }
     assert!(cdir.join("skills/hearth/SKILL.md").exists());
     assert!(std::fs::read_to_string(xdir.join("AGENTS.md")).unwrap().starts_with("# My rules\n\nBe nice.\n"));
     assert!(run(args("remove")).status.success());
@@ -662,6 +665,36 @@ fn p15_agent_setup_is_idempotent_and_reversible() {
     let mut cmd = Command::new(bin("hearth"));
     let o = cmd.args(["agent", "context"]).env("HEARTH_SESSION", "s9").env("HEARTH_BLOCK", "b42").output().unwrap();
     assert!(String::from_utf8_lossy(&o.stdout).contains("block b42"));
+    // An older setup with only the context hook gains the status hooks.
+    let old = "{\n  \"hooks\": {\n    \"SessionStart\": [\n      {\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"hearth agent context\"\n          }\n        ]\n      }\n    ]\n  }\n}\n";
+    std::fs::write(cdir.join("settings.json"), old).unwrap();
+    assert!(run(args("setup")).status.success());
+    let up: Value = serde_json::from_str(&std::fs::read_to_string(cdir.join("settings.json")).unwrap()).unwrap();
+    assert_eq!(up["hooks"]["SessionStart"].as_array().unwrap().len(), 1, "no duplicate context hook");
+    assert!(up["hooks"]["Stop"].to_string().contains("hearth agent status done"));
+}
+
+#[test]
+fn agent_status_hook_reports_on_its_own_tab_and_is_silent_elsewhere() {
+    let d = Daemon::new(None);
+    let (c, _rx) = d.client();
+    // Run by a hook inside a Hearth terminal: hook JSON on stdin.
+    let script = format!(
+        "printf '%s' '{{\"hook_event_name\":\"Notification\",\"message\":\"Claude needs your permission to use Bash\"}}' | {} agent status blocked --app claude; echo MARK-$((1+1)); sleep 600",
+        bin("hearth").display()
+    );
+    let b = new_session(&c, sh(&script));
+    wait_text(&c, &b, "MARK-2");
+    let st = call(&c, "terminal.status", json!({"block": b}));
+    let r = &st["records"][0];
+    assert_eq!(r["state"], "blocked", "{st}");
+    assert_eq!(r["app"], "claude", "{st}");
+    assert_eq!(r["msg"], "Claude needs your permission to use Bash", "{st}");
+    // Nothing visible was printed into the terminal.
+    assert!(!call(&c, "terminal.capture", json!({"block": b}))["content"].as_str().unwrap().contains("7501"));
+    // Outside Hearth: no output, success, no error.
+    let o = Command::new(bin("hearth")).args(["agent", "status", "done", "--app", "claude"]).env_remove("HEARTH_BLOCK").stdin(Stdio::null()).output().unwrap();
+    assert!(o.status.success() && o.stdout.is_empty() && o.stderr.is_empty(), "{o:?}");
 }
 
 #[test]

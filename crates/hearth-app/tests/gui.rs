@@ -609,9 +609,9 @@ fn gui_p16_status_indicators_notifications_bell_and_clipboard() {
     e.act(&c, "new-tab", json!({}));
     e.wait(&c, "second tab selected", |p| (p["tabs"][1]["selected"] == true).then_some(()));
     call(&c, "terminal.send_keys", json!({"block": b, "keys": ["C-c"]}));
-    send(&c, &b, "printf '\\033]7501;state=blocked:msg=QXBwcm92ZSBkZXBsb3k/\\033\\\\'; printf '\\a'; sleep 60");
+    send(&c, &b, "printf '\\033]7501;state=blocked:app=deployer:msg=QXBwcm92ZSBkZXBsb3k/\\033\\\\'; printf '\\a'; sleep 60");
     let p = e.wait(&c, "blocked indicator and notification", |p| {
-        (p["tabs"][0]["indicator"] == "blocked" && p["notified"].as_array()?.iter().any(|n| n.as_str().unwrap_or("").contains("needs your attention"))).then(|| p.clone())
+        (p["tabs"][0]["indicator"] == "blocked" && p["notified"].as_array()?.iter().any(|n| n.as_str().unwrap_or("").contains("deployer needs your attention | Approve deploy?"))).then(|| p.clone())
     });
     assert_eq!(p["tabs"][0]["loading"], false);
     assert_eq!(p["tabs"][0]["needs_attention"], true, "bell in a hidden tab marks it");
