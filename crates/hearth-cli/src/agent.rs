@@ -6,10 +6,12 @@ use crate::{Args, Flags, die};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
-/// Claude Code hooks this tool owns: (event, command). The status hooks
-/// show Claude's state on its Hearth tab and notify when it needs you.
-const HOOKS: &[(&str, &str)] = &[
-    ("SessionStart", "hearth agent context"),
+/// Claude Code hooks this tool owns: (event, command).
+const HOOKS: &[(&str, &str)] = &[("SessionStart", "hearth agent context")];
+
+/// Hooks an earlier version installed and setup now removes: Claude Code
+/// reports its own state with OSC 7501, so status hooks only duplicated it.
+const RETIRED: &[(&str, &str)] = &[
     ("UserPromptSubmit", "hearth agent status working --app claude"),
     ("PostToolUse", "hearth agent status working --app claude"),
     ("Notification", "hearth agent status blocked --app claude"),
@@ -84,11 +86,13 @@ fn claude_settings(path: &Path, install: bool) -> Result<Option<String>, String>
     if !v.is_object() {
         return Err(format!("{} is not a JSON object; not touching it", path.display()));
     }
+    let retired = RETIRED.iter().any(|(e, c)| has_hook(&v, e, c));
     if install {
         let missing: Vec<_> = HOOKS.iter().filter(|(e, c)| !has_hook(&v, e, c)).collect();
-        if missing.is_empty() {
+        if missing.is_empty() && !retired {
             return Ok(None);
         }
+        remove_hooks(&mut v, RETIRED);
         if v.get("hooks").is_none() {
             v["hooks"] = json!({});
         }
@@ -102,27 +106,33 @@ fn claude_settings(path: &Path, install: bool) -> Result<Option<String>, String>
                 .push(json!({"hooks": [{"type": "command", "command": cmd}]}));
         }
     } else {
-        if !HOOKS.iter().any(|(e, c)| has_hook(&v, e, c)) {
+        if !retired && !HOOKS.iter().any(|(e, c)| has_hook(&v, e, c)) {
             return Ok(None);
         }
-        for (event, cmd) in HOOKS {
-            if let Some(groups) = v["hooks"][*event].as_array_mut() {
-                for g in groups.iter_mut() {
-                    if let Some(hs) = g["hooks"].as_array_mut() {
-                        hs.retain(|h| h["command"] != *cmd);
-                    }
-                }
-                groups.retain(|g| g["hooks"].as_array().is_none_or(|h| !h.is_empty()));
-                if groups.is_empty() {
-                    v["hooks"].as_object_mut().unwrap().remove(*event);
-                }
-            }
-        }
-        if v["hooks"].as_object().is_some_and(|o| o.is_empty()) {
-            v.as_object_mut().unwrap().remove("hooks");
-        }
+        remove_hooks(&mut v, HOOKS);
+        remove_hooks(&mut v, RETIRED);
     }
     Ok(Some(serde_json::to_string_pretty(&v).unwrap() + "\n"))
+}
+
+fn remove_hooks(v: &mut Value, which: &[(&str, &str)]) {
+    for (event, cmd) in which {
+        // get_mut, not indexing: indexing a mutable Value inserts nulls.
+        if let Some(groups) = v.get_mut("hooks").and_then(|h| h.get_mut(*event)).and_then(|g| g.as_array_mut()) {
+            for g in groups.iter_mut() {
+                if let Some(hs) = g["hooks"].as_array_mut() {
+                    hs.retain(|h| h["command"] != *cmd);
+                }
+            }
+            groups.retain(|g| g["hooks"].as_array().is_none_or(|h| !h.is_empty()));
+            if groups.is_empty() {
+                v["hooks"].as_object_mut().unwrap().remove(*event);
+            }
+        }
+    }
+    if v["hooks"].as_object().is_some_and(|o| o.is_empty()) {
+        v.as_object_mut().unwrap().remove("hooks");
+    }
 }
 
 fn skill_text() -> String {
