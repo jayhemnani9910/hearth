@@ -420,6 +420,40 @@ impl QueryFilter {
 mod tests {
     use super::*;
 
+    /// Seeded xorshift: the same "random" input on every run.
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        /// Random bytes biased towards escape-sequence syntax.
+        fn bytes(&mut self, n: usize) -> Vec<u8> {
+            const SPICE: &[u8] = b"\x1b[]P\\;:?0123456789mHJK\x07\x9b\x90\x9d\xe6\x97\xa5\xf0\x9f";
+            (0..n).map(|_| { let r = self.next(); if r % 3 == 0 { SPICE[(r >> 8) as usize % SPICE.len()] } else { (r >> 16) as u8 } }).collect()
+        }
+    }
+
+    #[test]
+    fn random_output_in_random_chunks_never_panics_or_grows() {
+        let mut rng = Rng(0x2545f4914f6cdd1d);
+        for _ in 0..300 {
+            let data = rng.bytes(4000);
+            let mut seg = Segmenter::new();
+            let mut qf = QueryFilter::new();
+            let (mut fed, mut out) = (0, vec![]);
+            while fed < data.len() {
+                let n = (1 + rng.next() as usize % 64).min(data.len() - fed);
+                seg.push(&data[fed..fed + n], &mut out);
+                let _ = qf.push(&data[fed..fed + n]);
+                assert!(seg.held_len() <= MAX_HELD);
+                fed += n;
+            }
+        }
+    }
+
     fn collect(chunks: &[&[u8]]) -> (Vec<Piece>, Segmenter) {
         let mut s = Segmenter::new();
         let mut out = vec![];

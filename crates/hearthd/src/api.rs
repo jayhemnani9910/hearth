@@ -86,7 +86,7 @@ pub fn methods() -> Vec<Method> {
         Method { name: "terminal.run", summary: "Run a program in a new window, new session or split", params: obj(with_spawn(props(json!({"placement": {"type": "string", "enum": ["session", "window", "left", "right", "up", "down"]}, "target": t(S, "session (for window) or block (for splits)"), "name": t(S, "")}))), &["placement"]), result: ids.clone(), example: json!(null) },
         Method { name: "terminal.send_text", summary: "Write text to a terminal; paste=true wraps it in bracketed paste when the program enabled it", params: obj(json!({"block": t(S, ""), "text": t(S, ""), "paste": t("boolean", "")}), &["block", "text"]), result: ok.clone(), example: json!(null) },
         Method { name: "terminal.send_keys", summary: "Send named keys (Enter, C-c, M-x, Up, F5, …)", params: obj(json!({"block": t(S, ""), "keys": {"type": "array", "items": {"type": "string"}}}), &["block", "keys"]), result: ok.clone(), example: json!(null) },
-        Method { name: "terminal.capture", summary: "Capture terminal content as text, html or vt (restorable state)", params: obj(json!({"block": t(S, ""), "format": {"type": "string", "enum": ["text", "html", "vt"]}, "history": t("boolean", "include scrollback (bounded)")}), &["block"]), result: obj(json!({"format": t(S, ""), "content": t(S, ""), "cols": t("integer", ""), "rows": t("integer", ""), "cursor": t("array", "")}), &["format", "content"]), example: json!(null) },
+        Method { name: "terminal.capture", summary: "Capture terminal content as text, html or vt (restorable state)", params: obj(json!({"block": t(S, ""), "format": {"type": "string", "enum": ["text", "html", "vt"]}, "history": t("boolean", "include scrollback (bounded)"), "join": t("boolean", "text: join soft-wrapped rows into one line")}), &["block"]), result: obj(json!({"format": t(S, ""), "content": t(S, ""), "cols": t("integer", ""), "rows": t("integer", ""), "cursor": t("array", "")}), &["format", "content"]), example: json!(null) },
         Method { name: "terminal.wait", summary: "Wait until the block's child process exits. For a shell this means the shell exited", params: obj(json!({"block": t(S, ""), "timeout_ms": t("integer", "")}), &["block"]), result: obj(json!({"code": t("integer", ""), "signal": t("integer", "")}), &[]), example: json!(null) },
         Method { name: "terminal.wait_text", summary: "Wait until text appears on screen (polling capture)", params: obj(json!({"block": t(S, ""), "text": t(S, ""), "timeout_ms": t("integer", "")}), &["block", "text"]), result: ok.clone(), example: json!(null) },
         Method { name: "terminal.attach", summary: "Subscribe to a terminal: a snapshot (or resumed bytes) then live output arrive as data frames", params: obj(json!({"block": t(S, ""), "cols": t("integer", ""), "rows": t("integer", ""), "cell_w": t("integer", ""), "cell_h": t("integer", ""), "resume": {"type": "object", "properties": {"generation": t(S, ""), "offset": t("integer", "")}}}), &["block"]), result: obj(json!({"sub": t("integer", ""), "mode": t(S, "snapshot or resume"), "offset": t("integer", ""), "generation": t(S, "")}), &["sub", "mode", "offset", "generation"]), example: json!(null) },
@@ -481,7 +481,7 @@ impl Server {
                 let history = p["history"].as_bool().unwrap_or(false);
                 let fmt = p["format"].as_str().unwrap_or("text");
                 let content = match fmt {
-                    "text" => inner.model.capture_text(history),
+                    "text" => inner.model.capture_text(history, p["join"].as_bool().unwrap_or(false)),
                     "html" => inner.model.capture_html(history),
                     _ => String::from_utf8_lossy(&inner.model.snapshot()).into_owned(),
                 };
@@ -503,7 +503,7 @@ impl Server {
                 loop {
                     let (found, exited) = {
                         let inner = b.inner.lk();
-                        (inner.model.capture_text(false).contains(text), inner.exit.is_some() && inner.eof)
+                        (inner.model.capture_text(false, false).contains(text), inner.exit.is_some() && inner.eof)
                     };
                     if found {
                         return ok();

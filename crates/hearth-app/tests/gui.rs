@@ -227,10 +227,12 @@ fn norm(s: &str) -> String {
     v.join("\n")
 }
 
+/// The server's screen text, soft-wrapped rows joined like VTE's.
 fn server_text(c: &Client, block: &str) -> String {
-    norm(call(c, "terminal.capture", json!({"block": block}))["content"].as_str().unwrap())
+    norm(call(c, "terminal.capture", json!({"block": block, "join": true}))["content"].as_str().unwrap())
 }
 
+/// VTE's screen text; soft-wrapped rows come back joined.
 fn pane_text(p: &Value, block: &str) -> String {
     norm(p["panes"][block]["text"].as_str().unwrap_or(""))
 }
@@ -648,4 +650,35 @@ fn gui_remote_control_is_off_unless_enabled() {
     assert_eq!(r.unwrap_err().code, "not_ready", "no app may accept client.action without opting in");
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(first_session(&c)["windows"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn gui_p03_recorded_programs_match_in_vte_live_and_after_reopening() {
+    let corpus = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../hearthd/tests/corpus");
+    let mut e = Env::new(None);
+    e.start_daemon();
+    let (c, _rx) = e.client();
+    let ids = call(&c, "session.create", json!({"name": "rec"}));
+    let b = ids["block"].as_str().unwrap().to_string();
+    e.start_app(&["--remote-control", "--session", "rec"]);
+    e.wait_app(&c);
+    e.wait(&c, "attached", |p| p["panes"][&b]["sub"].is_u64().then_some(()));
+    for (i, name) in ["vim", "less", "nano", "whiptail", "progress", "git-log"].iter().enumerate() {
+        let f = corpus.join(format!("{name}.vt"));
+        assert!(f.exists(), "{} missing", f.display());
+        // Reset the character set and colors so the marker prints as text.
+        // The recordings ask the terminal questions; the server's answers
+        // arrive as input, so swallow them before the next command.
+        send(&c, &b, &format!("clear; cat '{}'; read -rs -t 1 -d '' _; printf '\\033(B\\033[0m\\n'; echo END-$(({i}+100))", f.display()));
+        wait_server_text(&c, &b, &format!("END-{}", i + 100));
+        assert_same_screen(&mut e, &c, &b);
+    }
+    // Leave it inside vim's alternate screen, then reopen the app.
+    send(&c, &b, &format!("clear; head -c 20000 '{}'; sleep 600", corpus.join("vim.vt").display()));
+    std::thread::sleep(Duration::from_millis(500));
+    assert_same_screen(&mut e, &c, &b);
+    e.stop_app();
+    e.start_app(&["--remote-control", "--session", "rec"]);
+    e.wait_app(&c);
+    assert_same_screen(&mut e, &c, &b);
 }

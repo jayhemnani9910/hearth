@@ -239,7 +239,7 @@ fn p03_repeated_attach_during_output_is_exact() {
     assert!(offsets.windows(2).any(|w| w[0] != w[1]), "attaches happened at different offsets: {offsets:?}");
     for s in streams.iter().chain(std::iter::once(&last)) {
         let m = s.model(60, 12);
-        assert_eq!(m.capture_text(true), server_text, "sub {} (snapshot at {}) diverged", s.sub, s.snapshot.as_ref().unwrap().0);
+        assert_eq!(m.capture_text(true, false), server_text, "sub {} (snapshot at {}) diverged", s.sub, s.snapshot.as_ref().unwrap().0);
         assert_eq!(m.snapshot(), last.model(60, 12).snapshot(), "full state (modes, cursor, colors) diverged");
     }
 }
@@ -257,7 +257,7 @@ fn p03_alternate_screen_and_modes_survive_reattach() {
     let server = call(&c, "terminal.capture", json!({"block": b}));
     assert!(server["alternate_screen"] == true);
     assert!(m.alt_screen());
-    assert_eq!(m.capture_text(false), server["content"].as_str().unwrap());
+    assert_eq!(m.capture_text(false, false), server["content"].as_str().unwrap());
     use alacritty_terminal::term::TermMode;
     assert!(m.mode().contains(TermMode::APP_CURSOR | TermMode::BRACKETED_PASTE));
     assert_eq!(m.title.as_deref(), Some("edit"));
@@ -402,7 +402,7 @@ fn resume_within_window_and_fresh_attach_after() {
     let mut r = Stream { sub: v["sub"].as_u64().unwrap() as u32, snapshot: s.snapshot.clone(), data: s.data.clone(), next: have };
     drain(&rx, &mut [&mut r], Duration::from_millis(300));
     let server = call(&c, "terminal.capture", json!({"block": b, "history": true}));
-    assert_eq!(r.model(60, 12).capture_text(true), server["content"].as_str().unwrap(), "resumed state is exact");
+    assert_eq!(r.model(60, 12).capture_text(true, false), server["content"].as_str().unwrap(), "resumed state is exact");
     // Wrong generation (e.g. another server incarnation) -> fresh snapshot.
     let v = call(&c, "terminal.attach", json!({"block": b, "resume": {"generation": "old-x", "offset": have}}));
     assert_eq!(v["mode"], "snapshot");
@@ -498,7 +498,7 @@ fn p11_p13_cli_json_capture_wait_and_exit_codes() {
     let vt: Value = serde_json::from_slice(&vt.stdout).unwrap();
     let mut m = Model::new(vt["cols"].as_u64().unwrap() as u16, vt["rows"].as_u64().unwrap() as u16, 1000);
     m.advance(vt["content"].as_str().unwrap().as_bytes());
-    assert!(m.capture_text(false).contains("bold red <tag>"));
+    assert!(m.capture_text(false, false).contains("bold red <tag>"));
     // Failures: nonzero, structured, nothing on stdout.
     let e = d.cli(&["capture", "-t", "b999"]);
     assert_eq!(e.status.code(), Some(3));

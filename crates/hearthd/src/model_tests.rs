@@ -38,8 +38,13 @@ fn feed(m: &mut Model, b: &[u8]) {
 
 /// Attach at every split point of `prefix`, then continue with `suffix`.
 fn check(name: &str, cols: u16, rows: u16, prefix: &[u8], suffix: &[u8], step: usize) {
-    let mut i = 0;
-    while i <= prefix.len() {
+    let points: Vec<usize> = (0..=prefix.len()).step_by(step).collect();
+    check_at(name, cols, rows, prefix, suffix, &points);
+}
+
+/// Attach at each of `points` in `prefix`, then continue with `suffix`.
+fn check_at(name: &str, cols: u16, rows: u16, prefix: &[u8], suffix: &[u8], points: &[usize]) {
+    for &i in points {
         let mut a = Model::new(cols, rows, 1000);
         feed(&mut a, &prefix[..i]);
         let at = a.applied() as usize;
@@ -54,8 +59,35 @@ fn check(name: &str, cols: u16, rows: u16, prefix: &[u8], suffix: &[u8], step: u
         if da != db {
             panic!("{name}: split {i} (applied {at}) differs\n--- original\n{da}\n--- restored\n{db}\nsnapshot: {:?}", String::from_utf8_lossy(&snap));
         }
-        i += step;
     }
+}
+
+/// Output recorded from real programs (tests/corpus/record.sh), attached
+/// at seeded random points.
+#[test]
+fn recorded_programs_restore_exactly_at_random_points() {
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/corpus");
+    let mut n = 0;
+    for e in std::fs::read_dir(dir).unwrap() {
+        let path = e.unwrap().path();
+        if path.extension().is_none_or(|x| x != "vt") {
+            continue;
+        }
+        let bytes = std::fs::read(&path).unwrap();
+        let mut seed = bytes.len() as u64 | 1;
+        let mut points: Vec<usize> = (0..150)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                (seed % (bytes.len() as u64 + 1)) as usize
+            })
+            .collect();
+        points.extend([0, bytes.len()]);
+        check_at(&path.display().to_string(), 80, 24, &bytes, b"", &points);
+        n += 1;
+    }
+    assert!(n >= 6, "corpus missing: {n} recordings");
 }
 
 #[test]
@@ -131,9 +163,59 @@ fn osc7501_and_prompt_lifecycle() {
 fn capture_formats() {
     let mut m = Model::new(20, 3, 100);
     m.advance(b"a<b>\r\n\x1b[31mred\x1b[0m");
-    assert_eq!(m.capture_text(false), "a<b>\nred\n");
+    assert_eq!(m.capture_text(false, false), "a<b>\nred\n");
     let h = m.capture_html(false);
     assert!(h.contains("a&lt;b&gt;"));
     assert!(h.contains("color:#cc6666"));
 }
 
+
+/// Random output: the model and its snapshots must not panic, and a restored
+/// snapshot must itself be restorable.
+#[test]
+fn random_output_never_panics_the_model() {
+
+    /// Seeded xorshift: the same "random" input on every run.
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        /// Random bytes biased towards escape-sequence syntax.
+        fn bytes(&mut self, n: usize) -> Vec<u8> {
+            const SPICE: &[u8] = b"\x1b[]P\\;:?0123456789mHJK\x07\x9b\x90\x9d\xe6\x97\xa5\xf0\x9f";
+            (0..n).map(|_| { let r = self.next(); if r % 3 == 0 { SPICE[(r >> 8) as usize % SPICE.len()] } else { (r >> 16) as u8 } }).collect()
+        }
+    }
+
+    let mut rng = Rng(0xdeadbeefcafef00d);
+    for _ in 0..60 {
+        let mut a = Model::new(40, 10, 100);
+        let data = rng.bytes(3000);
+        let mut fed = 0;
+        while fed < data.len() {
+            let n = (1 + rng.next() as usize % 200).min(data.len() - fed);
+            feed(&mut a, &data[fed..fed + n]);
+            fed += n;
+            if rng.next() % 5 == 0 {
+                let mut b = Model::new(40, 10, 100);
+                feed(&mut b, &a.snapshot());
+                let _ = b.snapshot();
+            }
+            if rng.next() % 17 == 0 {
+                a.resize(20 + (rng.next() % 60) as u16, 3 + (rng.next() % 20) as u16);
+            }
+        }
+    }
+}
+
+#[test]
+fn capture_can_join_soft_wrapped_rows() {
+    let mut m = Model::new(10, 4, 100);
+    feed(&mut m, b"0123456789abcdef\r\nshort  \r\n");
+    assert_eq!(m.capture_text(false, false), "0123456789\nabcdef\nshort\n");
+    assert_eq!(m.capture_text(false, true), "0123456789abcdef\nshort\n");
+}

@@ -32,7 +32,7 @@ terminals
       [-c DIR] [--close] [--wait] -- CMD...
   send [-t BLOCK] [--paste] TEXT...     write text
   keys [-t BLOCK] KEY...               Enter C-c M-x Up F5 ...
-  capture [-t BLOCK] [--format text|html|vt] [--history]
+  capture [-t BLOCK] [--format text|html|vt] [--history] [--join]
   wait [-t BLOCK] [--timeout MS] [--text TEXT]   exit status = the program's
   info [-t BLOCK] | status [-t BLOCK] | size -t BLOCK COLS ROWS
   attach [-t BLOCK]                    view a terminal here (Ctrl-] detaches)
@@ -421,8 +421,9 @@ fn run_command(args: &Args, c: &Client, cmd: &str, f: &mut Flags) {
             let b = block_target(f);
             let fmt = f.opt(&["--format", "-f"]).unwrap_or("text".into());
             let history = f.has(&["--history"]);
+            let join = f.has(&["--join", "-J"]);
             f.positional();
-            let v = call(c, "terminal.capture", json!({"block": b, "format": fmt, "history": history}));
+            let v = call(c, "terminal.capture", json!({"block": b, "format": fmt, "history": history, "join": join}));
             print(args, &v, |v| print!("{}", v["content"].as_str().unwrap_or("")));
         }
         "wait" => {

@@ -117,6 +117,54 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// Seeded xorshift: the same "random" input on every run.
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        /// Random bytes biased towards escape-sequence syntax.
+        fn bytes(&mut self, n: usize) -> Vec<u8> {
+            const SPICE: &[u8] = b"\x1b[]P\\;:?0123456789mHJK\x07\x9b\x90\x9d\xe6\x97\xa5\xf0\x9f";
+            (0..n).map(|_| { let r = self.next(); if r % 3 == 0 { SPICE[(r >> 8) as usize % SPICE.len()] } else { (r >> 16) as u8 } }).collect()
+        }
+    }
+
+    #[test]
+    fn random_and_damaged_input_never_panics() {
+        let mut rng = Rng(0x9e3779b97f4a7c15);
+        for round in 0..2000 {
+            let mut input = vec![];
+            // Valid frames with bytes flipped, cut short, or plain noise.
+            let frame = match round % 4 {
+                0 => Frame::Json(json!({"type": "request", "id": round})),
+                1 => Frame::Data { sub: 1, offset: round, bytes: rng.bytes(20) },
+                2 => Frame::Input { sub: 2, seq: round, bytes: rng.bytes(5) },
+                _ => Frame::Snapshot { sub: 3, offset: 0, bytes: rng.bytes(40) },
+            };
+            write_frame(&mut input, &frame).unwrap();
+            let flips = rng.next() as usize % 4;
+            for _ in 0..flips {
+                let i = rng.next() as usize % input.len();
+                input[i] = rng.next() as u8;
+            }
+            input.truncate(input.len() - rng.next() as usize % 3);
+            let extra = rng.next() as usize % 30;
+            input.extend(rng.bytes(extra));
+            let mut r = &input[..];
+            // Ok(Some), Ok(None) or Err are all fine; reading must stop.
+            for _ in 0..input.len() + 1 {
+                match read_frame(&mut r) {
+                    Ok(Some(_)) => continue,
+                    _ => break,
+                }
+            }
+        }
+    }
+
     #[test]
     fn roundtrip() {
         let frames = vec![

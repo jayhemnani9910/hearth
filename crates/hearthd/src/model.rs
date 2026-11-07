@@ -433,7 +433,9 @@ impl Model {
     }
 
     /// Plain-text capture of visible screen (and optionally history).
-    pub fn capture_text(&self, history: bool) -> String {
+    /// Screen text, one line per row; `join` puts soft-wrapped rows back
+    /// together into the line the program wrote.
+    pub fn capture_text(&self, history: bool, join: bool) -> String {
         let grid = self.term.grid();
         let mut out = String::new();
         for l in line_range(grid, history) {
@@ -445,6 +447,10 @@ impl Model {
                     continue;
                 }
                 s.push_str(&pen_cell_text(cell));
+            }
+            if join && row[Column(grid.columns() - 1)].flags.contains(Flags::WRAPLINE) {
+                out.push_str(&s);
+                continue;
             }
             out.push_str(s.trim_end());
             out.push('\n');

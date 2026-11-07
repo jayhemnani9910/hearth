@@ -1,0 +1,47 @@
+[?1049h[22;0;0t[24;1H[?1h=* [33mcommit 4874c276dbe718c3c0f85be6fb95494d7bf93745[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmaster[m[33m, [m[1;32mbranch-15[m[33m)[m[m
+[31m|[m Author: Sample Author <sample@example.com>[m
+[31m|[m Date:   Thu Jan 1 00:00:00 2026 +0000[m
+[31m|[m [m
+[31m|[m     commit 15: change number 15[m
+[31m|[m [m
+* [33mcommit 859ba79a82cd0377e738ad9e08bf18271966de8e[m[m
+[31m|[m Author: Sample Author <sample@example.com>[m
+[31m|[m Date:   Thu Jan 1 00:00:00 2026 +0000[m
+[31m|[m [m
+[31m|[m     commit 14: change number 14[m
+[31m|[m [m
+* [33mcommit 1b042dd7f77d188e9230ee0fee1569abe6e4caf3[m[m
+[31m|[m Author: Sample Author <sample@example.com>[m
+[31m|[m Date:   Thu Jan 1 00:00:00 2026 +0000[m
+[31m|[m [m
+[31m|[m     commit 13: change number 13[m
+[31m|[m [m
+* [33mcommit e65331b2ce84a4b7f107c0288e7c7e4068b41785[m[m
+[31m|[m Author: Sample Author <sample@example.com>[m
+[31m|[m Date:   Thu Jan 1 00:00:00 2026 +0000[m
+[31m|[m [m
+[31m|[m     commit 12: change number 12[m
+:[K[K[31m|[m [m
+* [33mcommit 5f5e5b7ec9ae73f46bebb51fd97ba49d0945ec1a[m[m
+[31m|[m Author: Sample Author <sample@example.com>[m
+[31m|[m Date:   Thu Jan 1 00:00:00 2026 +0000[m
+[31m|[m [m
+[31m|[m     commit 11: change number 11[m
+[31m|[m [m
+* [33mcommit 0a722978330943d308e29d59a023a50640c37646[m[33m ([m[1;32mbranch-10[m[33m)[m[m
+[31m|[m Author: Sample Author <sample@example.com>[m
+[31m|[m Date:   Thu Jan 1 00:00:00 2026 +0000[m
+[31m|[m [m
+[31m|[m     commit 10: change number 10[m
+[31m|[m [m
+* [33mcommit 793ec8f5799ff75b499c29d0d3070e778fb0a421[m[m
+[31m|[m Author: Sample Author <sample@example.com>[m
+[31m|[m Date:   Thu Jan 1 00:00:00 2026 +0000[m
+[31m|[m [m
+[31m|[m     commit 9: change number 9[m
+[31m|[m [m
+* [33mcommit d08daf7f362d7c018cc5141b93a623441a436df4[m[m
+[31m|[m Author: Sample Author <sample@example.com>[m
+[31m|[m Date:   Thu Jan 1 00:00:00 2026 +0000[m
+[31m|[m [m
+:[K[K[?1l>[?1049l[23;0;0t
