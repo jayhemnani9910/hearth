@@ -600,14 +600,16 @@ fn gui_p16_status_indicators_notifications_bell_and_clipboard() {
     e.wait_app(&c);
     e.wait(&c, "attached", |p| p["panes"][&b]["sub"].is_u64().then_some(()));
 
-    send(&c, &b, "printf '\\033]7501;state=working:msg=QnVpbGRpbmc=\\033\\\\'; echo W$((0+1))");
+    // Records live until the shell prompt returns, so the program keeps running.
+    send(&c, &b, "printf '\\033]7501;state=working:msg=QnVpbGRpbmc=\\033\\\\'; sleep 60");
     let p = e.wait(&c, "working indicator", |p| (p["tabs"][0]["loading"] == true).then(|| p.clone()));
     assert_eq!(p["panes"][&b]["status"], "● working");
 
     // Move to another tab so the pane is out of sight, then block.
     e.act(&c, "new-tab", json!({}));
     e.wait(&c, "second tab selected", |p| (p["tabs"][1]["selected"] == true).then_some(()));
-    send(&c, &b, "printf '\\033]7501;state=blocked:msg=QXBwcm92ZSBkZXBsb3k/\\033\\\\'; printf '\\a'; echo B$((0+1))");
+    call(&c, "terminal.send_keys", json!({"block": b, "keys": ["C-c"]}));
+    send(&c, &b, "printf '\\033]7501;state=blocked:msg=QXBwcm92ZSBkZXBsb3k/\\033\\\\'; printf '\\a'; sleep 60");
     let p = e.wait(&c, "blocked indicator and notification", |p| {
         (p["tabs"][0]["indicator"] == "blocked" && p["notified"].as_array()?.iter().any(|n| n.as_str().unwrap_or("").contains("needs your attention"))).then(|| p.clone())
     });
@@ -619,6 +621,7 @@ fn gui_p16_status_indicators_notifications_bell_and_clipboard() {
     e.wait(&c, "attention cleared", |p| (p["tabs"][0]["selected"] == true && p["tabs"][0]["needs_attention"] == false).then_some(()));
 
     // OSC 52 from a program reaches the desktop clipboard.
+    call(&c, "terminal.send_keys", json!({"block": b, "keys": ["C-c"]}));
     send(&c, &b, "printf '\\033]52;c;%s\\a' $(printf 'from-osc52' | base64)");
     e.wait(&c, "clipboard toast", |p| p["clipboard_note"].as_str().filter(|s| s.contains(&b)).map(|_| ()));
     e.act(&c, "test-clipboard", json!({}));

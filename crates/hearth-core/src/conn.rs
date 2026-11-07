@@ -107,10 +107,12 @@ pub enum Incoming {
 }
 
 type Pending = Arc<Mutex<HashMap<u64, Sender<Result<Value, ApiError>>>>>;
+type Waker = Arc<Mutex<Option<Box<dyn Fn() + Send + Sync>>>>;
 
 pub struct Client {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     pending: Pending,
+    waker: Waker,
     next_id: AtomicU64,
     pub welcome: Value,
     pub target: Target,
@@ -230,6 +232,13 @@ impl Client {
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let (tx, rx) = mpsc::channel();
         let p2 = pending.clone();
+        let waker: Waker = Arc::default();
+        let w2 = waker.clone();
+        let wake = move || {
+            if let Some(f) = &*w2.lock().unwrap() {
+                f();
+            }
+        };
         std::thread::Builder::new()
             .name("hearth-conn-reader".into())
             .spawn(move || {
@@ -268,17 +277,20 @@ impl Client {
                         Ok(None) => break "server closed the connection".to_string(),
                         Err(e) => break format!("stream error: {e}"),
                     }
+                    wake();
                 };
                 for (_, s) in p2.lock().unwrap().drain() {
                     let _ = s.send(Err(ApiError::new("disconnected", reason.clone())));
                 }
                 let _ = tx.send(Incoming::Closed(reason));
+                wake();
             })
             .expect("spawn reader");
         Ok((
             Client {
                 writer,
                 pending,
+                waker,
                 next_id: AtomicU64::new(1),
                 welcome,
                 target: target.clone(),
@@ -287,6 +299,12 @@ impl Client {
             },
             rx,
         ))
+    }
+
+    /// Calls `f` (on the reader thread) after each incoming message or
+    /// response, so a GUI can sleep until there is something to handle.
+    pub fn set_waker(&self, f: impl Fn() + Send + Sync + 'static) {
+        *self.waker.lock().unwrap() = Some(Box::new(f));
     }
 
     fn send(&self, frame: &Frame) -> Result<(), ApiError> {

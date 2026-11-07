@@ -37,14 +37,15 @@ pub struct Ui {
 }
 
 thread_local! {
-    /// Open windows, so a notification can find the one it came from.
-    static WINDOWS: RefCell<Vec<(u32, std::rc::Weak<Win>)>> = const { RefCell::new(Vec::new()) };
+    /// Open windows. Owns each one until its window closes, and lets
+    /// notifications and wake-ups find it by id.
+    static WINDOWS: RefCell<Vec<(u32, Rc<Win>)>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Target of the `app.focus-block` action: "<window id>/<block>".
 pub fn focus_from_notification(target: &str) {
     let Some((id, block)) = target.split_once('/') else { return };
-    let win = WINDOWS.with(|ws| ws.borrow().iter().find(|(i, _)| i.to_string() == id).and_then(|(_, w)| w.upgrade()));
+    let win = WINDOWS.with(|ws| ws.borrow().iter().find(|(i, _)| i.to_string() == id).map(|(_, w)| w.clone()));
     if let Some(w) = win {
         w.ui.window.present();
         let block = block.to_string();
@@ -60,7 +61,11 @@ pub struct Win {
     st: RefCell<State>,
     /// Set while we change tabs ourselves, so tab signals are not echoed.
     syncing: Cell<bool>,
-    tick: Cell<Option<glib::SourceId>>,
+    /// Timers owned by the window, removed when it closes.
+    timers: RefCell<Vec<glib::SourceId>>,
+    /// A wake-up is already queued on the main loop.
+    wake_queued: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    size_check_queued: Cell<bool>,
 }
 
 enum Conn {
@@ -136,9 +141,8 @@ pub struct State {
     log: Vec<String>,
     notified: Vec<String>,
     created_first: bool,
-    /// Test probe: last nonce asked for and when the file was last written.
+    /// Test probe: the last nonce asked for.
     probe_nonce: Value,
-    probe_at: Option<Instant>,
 }
 
 pub struct Options {
@@ -208,23 +212,36 @@ impl Win {
                 notified: vec![],
                 created_first: false,
                 probe_nonce: Value::Null,
-                probe_at: None,
             }),
             syncing: Cell::new(false),
-            tick: Cell::new(None),
+            timers: RefCell::default(),
+            wake_queued: std::sync::Arc::default(),
+            size_check_queued: Cell::new(false),
         });
         win.wire();
-        WINDOWS.with(|ws| {
-            let mut ws = ws.borrow_mut();
-            ws.retain(|(_, w)| w.strong_count() > 0);
-            ws.push((win.id, Rc::downgrade(&win)));
-        });
-        let w = win.clone();
-        let id = glib::timeout_add_local(Duration::from_millis(8), move || {
-            w.with(|w, s| w.tick(s));
+        WINDOWS.with(|ws| ws.borrow_mut().push((win.id, win.clone())));
+        // The loop sleeps until the connection has something (see `waker`).
+        // This slow timer is only a safety net for missed size changes.
+        let w = Rc::downgrade(&win);
+        let safety = glib::timeout_add_local(Duration::from_secs(1), move || {
+            if let Some(w) = w.upgrade() {
+                w.with(|w, s| w.tick(s));
+            }
             glib::ControlFlow::Continue
         });
-        win.tick.set(Some(id));
+        win.timers.borrow_mut().push(safety);
+        if probe_path().is_some() {
+            // Tests read the app's state even while it is disconnected.
+            let w = Rc::downgrade(&win);
+            let probe = glib::timeout_add_local(Duration::from_millis(100), move || {
+                if let Some(w) = w.upgrade() {
+                    w.with(|w, s| w.write_probe(s));
+                }
+                glib::ControlFlow::Continue
+            });
+            win.timers.borrow_mut().push(probe);
+        }
+        win.wake();
         win.with(|w, s| w.refresh_title(s));
         win.ui.window.present();
         win
@@ -352,6 +369,21 @@ impl Win {
                 }
             });
         });
+        // Anything that can change pane sizes asks for a size check.
+        for prop in ["default-width", "default-height", "maximized", "fullscreened"] {
+            let w = Rc::downgrade(self);
+            ui.window.connect_notify_local(Some(prop), move |_, _| {
+                if let Some(w) = w.upgrade() {
+                    w.check_sizes_soon();
+                }
+            });
+        }
+        let w = Rc::downgrade(self);
+        ui.banner.connect_revealed_notify(move |_| {
+            if let Some(w) = w.upgrade() {
+                w.check_sizes_soon();
+            }
+        });
         let w = Rc::downgrade(self);
         adw::StyleManager::default().connect_dark_notify(move |_| {
             if let Some(w) = w.upgrade() {
@@ -361,9 +393,10 @@ impl Win {
         let w = Rc::downgrade(self);
         ui.window.connect_close_request(move |_| {
             if let Some(w) = w.upgrade() {
-                if let Some(id) = w.tick.take() {
+                for id in w.timers.take() {
                     id.remove();
                 }
+                WINDOWS.with(|ws| ws.borrow_mut().retain(|(i, _)| *i != w.id));
                 w.with(|_, s| {
                     // Programs keep running on the server; this only disconnects.
                     s.conn = Conn::Closed;
@@ -424,21 +457,66 @@ impl Win {
 
     // --------------------------------------------------------------- tick
 
+    /// Queues a `tick` on the main loop; callable from any thread.
+    fn waker(&self) -> impl Fn() + Send + Sync + 'static {
+        let (id, queued) = (self.id, self.wake_queued.clone());
+        move || {
+            if !queued.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                // Always queued on the main loop's thread (unlike `invoke`,
+                // which may run on the calling thread).
+                glib::idle_add_once(move || {
+                    let w = WINDOWS.with(|ws| ws.borrow().iter().find(|(i, _)| *i == id).map(|(_, w)| w.clone()));
+                    if let Some(w) = w {
+                        w.with(|w, s| w.tick(s));
+                    }
+                });
+            }
+        }
+    }
+
+    fn wake(&self) {
+        (self.waker())();
+    }
+
+    /// Checks pane sizes once the next layout has happened.
+    fn check_sizes_soon(self: &Rc<Win>) {
+        if self.size_check_queued.replace(true) {
+            return;
+        }
+        for ms in [30, 200] {
+            let w = Rc::downgrade(self);
+            glib::timeout_add_local_once(Duration::from_millis(ms), move || {
+                if let Some(w) = w.upgrade() {
+                    if ms == 200 {
+                        w.size_check_queued.set(false);
+                    }
+                    w.wake();
+                }
+            });
+        }
+    }
+
     fn tick(self: &Rc<Win>, s: &mut State) {
+        self.wake_queued.store(false, std::sync::atomic::Ordering::Release);
         match &s.conn {
             Conn::Down { next, .. } if Instant::now() >= *next => {
                 let (tx, rx) = std::sync::mpsc::channel();
                 let host = s.host.clone();
+                let wake = self.waker();
                 std::thread::spawn(move || {
                     let _ = tx.send(connect_blocking(host));
+                    wake();
                 });
                 s.conn = Conn::Connecting(rx);
                 self.refresh_title(s);
             }
             Conn::Connecting(rx) => match rx.try_recv() {
                 Ok(Ok((c, rx))) => {
+                    c.set_waker(self.waker());
                     s.conn = Conn::Up(Rc::new(c), rx);
                     self.on_connected(s);
+                    // Messages that arrived before the waker was set.
+                    self.wake();
                 }
                 Ok(Err(e)) => self.connection_lost(s, e.to_string()),
                 Err(TryRecvError::Empty) => {}
@@ -449,7 +527,12 @@ impl Win {
         if let Conn::Up(_, rx) = &s.conn {
             let mut batch = vec![];
             let mut bytes = 0;
-            while bytes < FEED_BUDGET {
+            loop {
+                if bytes >= FEED_BUDGET {
+                    // Let the UI draw, then continue with the rest.
+                    self.wake();
+                    break;
+                }
                 match rx.try_recv() {
                     Ok(m) => {
                         if let Incoming::Data { bytes: b, .. } | Incoming::Snapshot { bytes: b, .. } = &m {
@@ -471,10 +554,6 @@ impl Win {
                 }
             }
         }
-        // Tests can read the app's state even while it is disconnected.
-        if probe_path().is_some() && s.probe_at.is_none_or(|t| t.elapsed() > Duration::from_millis(100)) {
-            self.write_probe(s);
-        }
         // Attach panes once laid out, so the attach carries their real size.
         let ready: Vec<String> = s
             .panes
@@ -485,7 +564,8 @@ impl Win {
         for id in ready {
             self.attach(s, &id, true);
         }
-        // VTE has no signal for grid size changes; compare each tick.
+        // VTE has no signal for grid size changes; compare here, after
+        // anything that can change a layout (`check_sizes_soon`).
         let changed: Vec<String> = s
             .panes
             .iter()
@@ -522,6 +602,12 @@ impl Win {
         };
         let was_up = matches!(s.conn, Conn::Up(..));
         s.conn = Conn::Down { next: Instant::now() + delay, delay };
+        let w = Rc::downgrade(self);
+        glib::timeout_add_local_once(delay, move || {
+            if let Some(w) = w.upgrade() {
+                w.wake();
+            }
+        });
         s.reason = reason.clone();
         s.pending.clear();
         s.subs.clear();
@@ -860,6 +946,7 @@ impl Win {
         s.incarnation.clear();
         s.created_first = false;
         s.conn = Conn::Down { next: Instant::now(), delay: Duration::from_millis(250) };
+        self.wake();
         self.refresh_title(s);
     }
 
@@ -973,6 +1060,7 @@ impl Win {
         }
         self.refresh_tabs(s);
         self.refresh_title(s);
+        self.check_sizes_soon();
     }
 
     fn rebuild_layout(self: &Rc<Win>, s: &mut State, wid: &str, w: &Value, key: String) {
@@ -1017,10 +1105,14 @@ impl Win {
                 let programmatic = Rc::new(Cell::new(false));
                 // Size changes: keep the ratio, not the pixel position.
                 let (r, prog) = (ratio.clone(), programmatic.clone());
+                let weak = Rc::downgrade(self);
                 paned.connect_max_position_notify(move |p| {
                     prog.set(true);
                     apply_ratio(p, r.get());
                     prog.set(false);
+                    if let Some(w) = weak.upgrade() {
+                        w.check_sizes_soon();
+                    }
                 });
                 // User drags: send the new ratio once the divider settles.
                 let (r, prog) = (ratio.clone(), programmatic.clone());
@@ -1028,6 +1120,9 @@ impl Win {
                 let weak = Rc::downgrade(self);
                 let (wid, p2) = (wid.to_string(), path.clone());
                 paned.connect_position_notify(move |p| {
+                    if let Some(w) = weak.upgrade() {
+                        w.check_sizes_soon();
+                    }
                     if prog.get() || p.max_position() <= 0 || !p.is_mapped() {
                         return;
                     }
@@ -1098,6 +1193,15 @@ impl Win {
             w.outbox.borrow_mut().push_back((id.clone(), text.as_bytes().to_vec()));
             w.with(|w, s| w.flush_input(s));
         });
+        for sig in ["map", "char-size-changed"] {
+            let weak = Rc::downgrade(self);
+            term.connect_local(sig, false, move |_| {
+                if let Some(w) = weak.upgrade() {
+                    w.check_sizes_soon();
+                }
+                None
+            });
+        }
         let focus = gtk::EventControllerFocus::new();
         let id = block.to_string();
         let weak = Rc::downgrade(self);
@@ -1580,6 +1684,7 @@ impl Win {
             "reconnect" => {
                 if let Conn::Down { .. } = s.conn {
                     s.conn = Conn::Down { next: Instant::now(), delay: Duration::from_millis(250) };
+                    self.wake();
                 }
             }
             "toggle-remote-control" => {
@@ -1645,7 +1750,6 @@ impl Win {
 
     fn write_probe(&self, s: &mut State) {
         let Some(path) = probe_path() else { return };
-        s.probe_at = Some(Instant::now());
         let mut panes = serde_json::Map::new();
         for (id, p) in &s.panes {
             let text = p.term.text_format(vte::Format::Text).map(|g| g.to_string()).unwrap_or_default();
