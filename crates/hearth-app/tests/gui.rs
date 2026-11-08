@@ -124,21 +124,26 @@ impl Env {
     /// The app's state after everything sent so far. While the app is
     /// disconnected (no remote control), a state written after this call.
     fn probe(&mut self, c: &Client) -> Value {
-        self.nonce += 1;
-        let n = self.nonce;
-        let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
-        let via_server = c.call("client.action", json!({"action": "probe", "args": {"nonce": n}})).is_ok();
         let path = self.dir.join("probe.json");
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            if let Some(v) = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) {
-                let fresh = if via_server { v["nonce"] == n } else { v["written_ms"].as_u64().unwrap_or(0) > since };
-                if fresh {
-                    return v;
+            // A probe sent just as the link drops never reaches the app, so
+            // ask again rather than wait for an answer that can't come.
+            self.nonce += 1;
+            let n = self.nonce;
+            let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+            let via_server = c.call("client.action", json!({"action": "probe", "args": {"nonce": n}})).is_ok();
+            let retry = Instant::now() + Duration::from_secs(1);
+            while Instant::now() < retry {
+                if let Some(v) = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) {
+                    let fresh = if via_server { v["nonce"] == n } else { v["written_ms"].as_u64().unwrap_or(0) > since };
+                    if fresh {
+                        return v;
+                    }
                 }
+                std::thread::sleep(Duration::from_millis(20));
             }
             assert!(Instant::now() < deadline, "no probe answer; app log:\n{}", self.app_log());
-            std::thread::sleep(Duration::from_millis(20));
         }
     }
 
@@ -469,7 +474,7 @@ fn gui_p10_reconnect_resumes_and_reports_unconfirmed_input() {
     // 1. Plain link loss: output produced meanwhile arrives after resume.
     let px = proxy();
     unsafe { libc::kill(px, libc::SIGKILL) };
-    let banner = e.wait(&c, "disconnect banner", |p| p["banner"].as_str().map(String::from));
+    let banner = e.wait(&c, "disconnect banner", |p| link_message(p, "Reconnecting"));
     assert!(banner.contains("Reconnecting"), "{banner}");
     send(&c, &b, "echo during-outage-$((3*3))");
     wait_server_text(&c, &b, "during-outage-9");
@@ -486,7 +491,7 @@ fn gui_p10_reconnect_resumes_and_reports_unconfirmed_input() {
     unsafe { libc::kill(px, libc::SIGSTOP) };
     std::thread::sleep(Duration::from_millis(900));
     unsafe { libc::kill(px, libc::SIGKILL) };
-    let banner = e.wait(&c, "unconfirmed-input banner", |p| p["banner"].as_str().filter(|b| b.contains("not confirmed")).map(String::from));
+    let banner = e.wait(&c, "unconfirmed-input banner", |p| link_message(p, "not confirmed"));
     assert!(banner.contains(&b), "{banner}");
     let note = e.wait(&c, "reconnected with a pane warning", |p| {
         (p["connected"] == true && p["panes"][&b]["sub"].is_u64()).then(|| p["panes"][&b]["note"].as_str().unwrap_or("").to_string())
@@ -497,6 +502,13 @@ fn gui_p10_reconnect_resumes_and_reports_unconfirmed_input() {
     e.act(&c, "test-type", json!({"text": "echo ok-$((5+5))\r"}));
     wait_server_text(&c, &b, "ok-10");
     e.wait(&c, "warning cleared", |p| (p["panes"][&b]["note"] == "").then_some(()));
+}
+
+/// The link-loss message. The app can reconnect and hide the banner before a
+/// probe sees it, so also look in the log, which gets the same text.
+fn link_message(p: &Value, needle: &str) -> Option<String> {
+    let log = p["log"].as_array().into_iter().flatten().rev().filter_map(Value::as_str);
+    p["banner"].as_str().into_iter().chain(log).find(|m| m.contains(needle)).map(String::from)
 }
 
 const CONFIG: &str = r#"

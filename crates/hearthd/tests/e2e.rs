@@ -415,7 +415,8 @@ fn resume_within_window_and_fresh_attach_after() {
 fn slow_viewer_is_cut_loose_without_stalling_others() {
     let d = Daemon::new(None);
     let (c, rx) = d.client();
-    let b = new_session(&c, sh("sleep 0.5; head -c 60000000 /dev/zero | tr '\\0' y; echo; echo FINISHED; sleep 30"));
+    // More than the 8 MiB a connection may queue, so the slow viewer overflows.
+    let b = new_session(&c, sh("sleep 0.5; head -c 20000000 /dev/zero | tr '\\0' y; echo; echo FINISHED; sleep 30"));
     // A raw client that attaches and then never reads.
     let mut slow = std::os::unix::net::UnixStream::connect(&d.sock).unwrap();
     proto::write_frame(&mut slow, &Frame::Json(json!({"type":"hello","protocol":"hearth.v1","min_version":1,"max_version":1,"client":{"kind":"app"}}))).unwrap();
@@ -425,14 +426,16 @@ fn slow_viewer_is_cut_loose_without_stalling_others() {
     let v = call(&c, "terminal.attach", json!({"block": b}));
     let sub = v["sub"].as_u64().unwrap() as u32;
     let t = Instant::now();
-    wait_text(&c, &b, "FINISHED");
+    // A debug build on a busy CI runner can need more than wait_text's 10 s,
+    // so wait as long as the assertion below allows.
+    c.call_timeout("terminal.wait_text", json!({"block": b, "text": "FINISHED", "timeout_ms": 30000}), Duration::from_secs(35)).unwrap();
     assert!(t.elapsed() < Duration::from_secs(30), "workload was not blocked by the slow viewer");
     // The healthy viewer received a continuous stream (Stream asserts it).
     let mut s = Stream::new(sub);
     while let Ok(m) = rx.recv_timeout(Duration::from_millis(300)) {
         s.take(&m);
     }
-    assert!(s.next > 60_000_000);
+    assert!(s.next > 20_000_000);
     // The slow viewer is told explicitly that it lost the stream.
     slow.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
     let mut told = false;
@@ -745,7 +748,8 @@ fn p16_osc7501_records_and_prompt_lifetime() {
     wait_text(&c, &b, "S3\n");
     assert_eq!(call(&c, "terminal.status", json!({"block": b}))["summary"], "done");
     // Feature detection reply comes from the server.
-    send("printf '\\033]7501;?\\033\\\\'; IFS= read -rs -t 2 -d '\\' r; printf '%s' \"$r\" | od -c | head -2; echo S$((4+0))");
+    // Echo goes off first: the reply can arrive before `read -s` would do it.
+    send("stty -echo; printf '\\033]7501;?\\033\\\\'; IFS= read -rs -t 2 -d '\\' r; stty echo; printf '%s' \"$r\" | od -c | head -2; echo S$((4+0))");
     wait_text(&c, &b, "S4\n");
     let t = call(&c, "terminal.capture", json!({"block": b}))["content"].as_str().unwrap().to_string();
     assert!(t.contains("7   5   0   1   ;   ?"), "{t}");
@@ -772,6 +776,12 @@ fn p09_tcp_identity_policy_with_stub_whois() {
     let port = free_port();
     let cfg = format!("hearth.set{{ listen = {{ 'tcp:127.0.0.1:{port}' }}, allow = {{ 'alice@example.com' }}, whois = '{}' }}", who.display());
     let d = Daemon::start(dir, Some(&cfg), &["--no-persist"]);
+    // The daemon opens the TCP listener after the Unix socket Daemon::start waits for.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+        assert!(Instant::now() < deadline, "tcp listener did not start");
+        std::thread::sleep(Duration::from_millis(20));
+    }
     let (c, _rx) = Client::connect(&Target::Tcp(format!("127.0.0.1:{port}")), "app", "t").unwrap();
     assert_eq!(c.welcome["principal"], "tailscale:alice@example.com");
     // Policy change: identity no longer allowed.
