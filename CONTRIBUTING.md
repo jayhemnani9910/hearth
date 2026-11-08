@@ -23,10 +23,12 @@ app on a headless GTK Broadway display. Each test gets its own server, socket
 and config, so they don't touch a Hearth you have running.
 
 To try a change by hand without touching your own server, point it at its own
-directories:
+directories. Set `HEARTH_SOCKET` too, or the client starts your installed
+`hearth.service` instead of the build:
 
 ```
 export HEARTH_RUNTIME_DIR=/run/user/$(id -u)/hearth-dev
+export HEARTH_SOCKET=$HEARTH_RUNTIME_DIR/server.sock
 export HEARTH_STATE_DIR=/tmp/hearth-dev/state HEARTH_CONFIG_DIR=/tmp/hearth-dev/cfg
 target/debug/hearth-app
 ```
